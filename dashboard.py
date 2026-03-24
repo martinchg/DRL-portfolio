@@ -14,7 +14,7 @@ from streamlit_extras.add_vertical_space import add_vertical_space
 from streamlit_extras.stoggle import stoggle
 
 sys.path.append(os.path.dirname(__file__))
-from data_loader import load_data, DataConfig, FEATURES
+from feature_engineering import load_data, DataConfig, FEATURES
 
 
 # ============================================================
