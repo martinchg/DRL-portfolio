@@ -31,17 +31,36 @@ class TrainConfig:
     algo             : str   = "PPO"       # "PPO" ou "A2C"
 
     # PPO Hyperparams
-    learning_rate    : float = 3e-4
-    n_steps          : int   = 2048        # Steps avant update
-    batch_size       : int   = 64
-    n_epochs         : int   = 10          # Epochs par update PPO
-    gamma            : float = 0.99        # Discount factor
-    gae_lambda       : float = 0.95        # GAE lambda
-    clip_range       : float = 0.2         # PPO clip range
-    ent_coef         : float = 0.01        # Bonus d'exploration
+    learning_rate : float = 1e-4  # Vitesse d'apprentissage
+                                  # Trop grand → instable
+                                  # Trop petit → lent
 
-    # Training
-    total_timesteps  : int   = 500_000     # Steps totaux
+    n_steps       : int   = 1024  # Steps collectés avant update
+                                  # Plus grand = plus stable mais + lent
+
+    batch_size    : int   = 128    # Taille des mini-batchs
+                                  # Plus petit = + de bruit = + d'exploration
+
+    n_epochs      : int   = 10    # Combien de fois on réutilise les données
+                                  # PPO permet de les réutiliser (≠ DQN)
+
+    gamma         : float = 0.99  # Importance du futur
+                                  # 0.99 → l'agent pense à ~100 steps
+                                  # 0.9  → l'agent pense à ~10 steps
+
+    gae_lambda    : float = 0.95  # Biais/variance tradeoff des avantages
+                                  # 1.0 = pas de biais mais + de variance
+                                  # 0.0 = biais mais variance nulle
+
+    clip_range    : float = 0.2   # Le "garde-fou" PPO
+                                  # Change max de 20% par update
+
+    ent_coef      : float = 0.05 # Bonus d'exploration
+                                  # Force l'agent à ne pas trop vite
+                                  # se spécialiser sur une seule action
+
+     # Training
+    total_timesteps  : int   = 200_000     # Steps totaux
     n_envs           : int   = 4           # Environnements parallèles
 
     # Sauvegarde
@@ -132,6 +151,9 @@ class FinancialMetricsCallback(BaseCallback):
 # ============================================================
 # FONCTION DE TRAINING PRINCIPALE
 # ============================================================
+# ============================================================
+# FONCTION DE TRAINING PRINCIPALE — VERSION CORRIGÉE
+# ============================================================
 def train(
     train_data : pd.DataFrame,
     val_data   : pd.DataFrame,
@@ -146,17 +168,13 @@ def train(
     print(f"  DRL Portfolio — Training {cfg_train.algo}")
     print(f"{'='*55}\n")
 
-    # ---- 1. Environnements ----
-
-    # Train envs (parallèles pour accélérer)
-    def make_env():
+    # ---- 1. Train env ----
+    def make_train_env():
         env = TradingEnv(data=train_data, cfg=cfg_env)
         env = Monitor(env, cfg_train.log_dir)
         return env
 
-    train_env = DummyVecEnv([make_env for _ in range(cfg_train.n_envs)])
-
-    # Normalisation des observations (très important pour PPO)
+    train_env = DummyVecEnv([make_train_env for _ in range(cfg_train.n_envs)])
     train_env = VecNormalize(
         train_env,
         norm_obs    = True,
@@ -164,79 +182,92 @@ def train(
         clip_obs    = 10.0
     )
 
-    # Eval env (1 seul, pas de normalisation pour les métriques brutes)
-    eval_env = TradingEnv(data=val_data, cfg=cfg_env, render_mode="human")
+    # ---- 2. Eval env (doit être wrappé pareil que train_env) ----
+    def make_eval_env():
+        env = TradingEnv(data=val_data, cfg=cfg_env)
+        env = Monitor(env, cfg_train.log_dir)
+        return env
 
-    # ---- 2. Modèle PPO ----
+    # ✅ FIX : VecNormalize sur l'eval env aussi
+    eval_env_sb3 = DummyVecEnv([make_eval_env])
+    eval_env_sb3 = VecNormalize(
+        eval_env_sb3,
+        norm_obs    = True,
+        norm_reward = True,
+        clip_obs    = 10.0,
+        training    = False   # ← Important : pas de update des stats sur eval
+    )
+
+    # Eval env séparé pour nos métriques custom (pas de VecNormalize)
+    eval_env_custom = TradingEnv(
+        data        = val_data,
+        cfg         = cfg_env,
+        render_mode = "human"
+    )
+
+    # ---- 3. Modèle PPO ----
     policy_kwargs = dict(
-        net_arch = [dict(pi=[128, 128], vf=[128, 128])]
-        # pi = politique (actor)
-        # vf = value function (critic)
-        # 2 couches de 128 neurons chacune
+        net_arch = [dict(pi=[64, 64], vf=[64, 64])]
     )
 
     if cfg_train.algo == "PPO":
         model = PPO(
-            policy        = "MlpPolicy",
-            env           = train_env,
-            learning_rate = cfg_train.learning_rate,
-            n_steps       = cfg_train.n_steps,
-            batch_size    = cfg_train.batch_size,
-            n_epochs      = cfg_train.n_epochs,
-            gamma         = cfg_train.gamma,
-            gae_lambda    = cfg_train.gae_lambda,
-            clip_range    = cfg_train.clip_range,
-            ent_coef      = cfg_train.ent_coef,
-            policy_kwargs = policy_kwargs,
+            policy          = "MlpPolicy",
+            env             = train_env,
+            learning_rate   = cfg_train.learning_rate,
+            n_steps         = cfg_train.n_steps,
+            batch_size      = cfg_train.batch_size,
+            n_epochs        = cfg_train.n_epochs,
+            gamma           = cfg_train.gamma,
+            gae_lambda      = cfg_train.gae_lambda,
+            clip_range      = cfg_train.clip_range,
+            ent_coef        = cfg_train.ent_coef,
+            policy_kwargs   = policy_kwargs,
             tensorboard_log = cfg_train.log_dir,
-            verbose       = 0
+            verbose         = 0
         )
     else:
         model = A2C(
-            policy        = "MlpPolicy",
-            env           = train_env,
-            learning_rate = cfg_train.learning_rate,
-            gamma         = cfg_train.gamma,
-            gae_lambda    = cfg_train.gae_lambda,
-            ent_coef      = cfg_train.ent_coef,
-            policy_kwargs = policy_kwargs,
+            policy          = "MlpPolicy",
+            env             = train_env,
+            learning_rate   = cfg_train.learning_rate,
+            gamma           = cfg_train.gamma,
+            gae_lambda      = cfg_train.gae_lambda,
+            ent_coef        = cfg_train.ent_coef,
+            policy_kwargs   = policy_kwargs,
             tensorboard_log = cfg_train.log_dir,
-            verbose       = 0
+            verbose         = 0
         )
 
-    # ---- 3. Callbacks ----
+    # ---- 4. Callbacks ----
 
     # a) Métriques financières custom
     financial_cb = FinancialMetricsCallback(
-        eval_env  = eval_env,
+        eval_env  = eval_env_custom,
         eval_freq = 10_000,
         verbose   = 1
     )
 
-    # b) EvalCallback SB3 standard (sauvegarde le meilleur modèle)
-    eval_sb3_env = Monitor(
-        TradingEnv(data=val_data, cfg=cfg_env),
-        cfg_train.log_dir
-    )
+    # b) ✅ EvalCallback avec eval_env wrappé correctement
     eval_cb = EvalCallback(
-        eval_env          = eval_sb3_env,
+        eval_env             = eval_env_sb3,
         best_model_save_path = cfg_train.save_dir,
-        log_path          = cfg_train.log_dir,
-        eval_freq         = 10_000,
-        n_eval_episodes   = 3,
-        deterministic     = True,
-        verbose           = 0
+        log_path             = cfg_train.log_dir,
+        eval_freq            = 10_000,
+        n_eval_episodes      = 3,
+        deterministic        = True,
+        verbose              = 0
     )
 
     callbacks = CallbackList([financial_cb, eval_cb])
 
-    # ---- 4. Training ----
+    # ---- 5. Training ----
     print(f"🚀 Début du training...")
-    print(f"   Algo           : {cfg_train.algo}")
-    print(f"   Total steps    : {cfg_train.total_timesteps:,}")
-    print(f"   Envs parallèles: {cfg_train.n_envs}")
-    print(f"   Learning rate  : {cfg_train.learning_rate}")
-    print(f"   Net arch       : [128, 128]\n")
+    print(f"   Algo            : {cfg_train.algo}")
+    print(f"   Total steps     : {cfg_train.total_timesteps:,}")
+    print(f"   Envs parallèles : {cfg_train.n_envs}")
+    print(f"   Learning rate   : {cfg_train.learning_rate}")
+    print(f"   Net arch        : [64, 64]\n")
 
     model.learn(
         total_timesteps = cfg_train.total_timesteps,
@@ -244,89 +275,14 @@ def train(
         progress_bar    = True
     )
 
-    # ---- 5. Sauvegarde finale ----
+    # ---- 6. Sauvegarde ----
     model_path = os.path.join(cfg_train.save_dir, cfg_train.model_name)
     model.save(model_path)
-
-    # Sauvegarde aussi le VecNormalize (important pour l'inférence !)
     train_env.save(os.path.join(cfg_train.save_dir, "vec_normalize.pkl"))
 
     print(f"\n✅ Modèle sauvegardé : {model_path}")
 
     return model, train_env, financial_cb.metrics_history
-
-
-# ============================================================
-# ÉVALUATION FINALE
-# ============================================================
-def evaluate(
-    model      : PPO,
-    test_data  : pd.DataFrame,
-    cfg_env    : EnvConfig,
-    vec_normalize_path : Optional[str] = None,
-    n_episodes : int = 5
-) -> dict:
-    """
-    Évalue le modèle sur le test set.
-    Compare avec Buy & Hold.
-    """
-    print(f"\n{'='*55}")
-    print(f"  Évaluation finale sur Test Set")
-    print(f"{'='*55}\n")
-
-    all_returns   = []
-    all_sharpes   = []
-    all_drawdowns = []
-    all_bh        = []
-
-    for ep in range(n_episodes):
-
-        env      = TradingEnv(data=test_data, cfg=cfg_env, render_mode="human")
-        obs, _   = env.reset(seed=ep)
-        done     = False
-
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, _, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-
-        portfolio = np.array(env.history["portfolio_values"])
-        prices    = np.array(env.history["prices"])
-
-        returns   = np.diff(portfolio) / (portfolio[:-1] + 1e-8)
-        sharpe    = (np.mean(returns) / (np.std(returns) + 1e-8)) * np.sqrt(252)
-        peak      = np.maximum.accumulate(portfolio)
-        max_dd    = np.max((peak - portfolio) / (peak + 1e-8))
-        total_ret = (portfolio[-1] - portfolio[0]) / portfolio[0]
-        bh_ret    = (prices[-1] - prices[0]) / prices[0]
-
-        all_returns.append(total_ret)
-        all_sharpes.append(sharpe)
-        all_drawdowns.append(max_dd)
-        all_bh.append(bh_ret)
-
-    # Résultats moyens
-    results = {
-        "mean_return"    : np.mean(all_returns),
-        "std_return"     : np.std(all_returns),
-        "mean_sharpe"    : np.mean(all_sharpes),
-        "mean_drawdown"  : np.mean(all_drawdowns),
-        "mean_bh_return" : np.mean(all_bh),
-        "alpha"          : np.mean(all_returns) - np.mean(all_bh),
-    }
-
-    print(f"  Return Agent   : {results['mean_return']:+.2%} "
-          f"(±{results['std_return']:.2%})")
-    print(f"  Buy & Hold     : {results['mean_bh_return']:+.2%}")
-    print(f"  Alpha          : {results['alpha']:+.2%}")
-    print(f"  Sharpe Ratio   : {results['mean_sharpe']:.3f}")
-    print(f"  Max Drawdown   : {results['mean_drawdown']:.2%}")
-
-    # Render du dernier épisode
-    env.render()
-
-    return results
-
 
 # ============================================================
 # PLOT TRAINING CURVES
@@ -404,10 +360,10 @@ if __name__ == "__main__":
     # 3. Config training
     cfg_train = TrainConfig(
         algo            = "PPO",
-        total_timesteps = 500_000,
+        total_timesteps = 200_000,
         n_envs          = 4,
-        learning_rate   = 3e-4,
-        ent_coef        = 0.01,
+        learning_rate   = 1e-4,
+        ent_coef        = 0.10,
         model_name      = "ppo_aapl"
     )
 
@@ -421,10 +377,3 @@ if __name__ == "__main__":
 
     # 5. Courbes de training
     plot_training_curves(metrics)
-
-    # 6. Évaluation finale sur test set
-    results = evaluate(
-        model     = model,
-        test_data = test_data,
-        cfg_env   = cfg_env,
-    )

@@ -16,7 +16,7 @@ from collections import deque
 class EnvConfig:
     # Portfolio
     initial_capital:   float = 10_000.0   # Capital de départ ($)
-    transaction_cost:  float = 0.001      # 0.1% par trade (frais réalistes)
+    transaction_cost:  float = 0.002      # 0.2% par trade (frais réalistes)
     
     # Observation
     window_size:       int   = 10         # Nombre de jours que l'agent "voit"
@@ -35,9 +35,7 @@ class EnvConfig:
 FEATURES = [
     'log_returns',
     'volatility',
-    'rsi',
-    'dist_to_sma',
-    'market_regime',
+    'rsi'
 ]
 
 
@@ -121,23 +119,24 @@ class TradingEnv(gym.Env):
     ) -> Tuple[np.ndarray, dict]:
         
         super().reset(seed=seed)
+
+        # ✅ Point de départ aléatoire
+        max_start = self.n_steps - self.cfg.window_size - 100
+        self._current_step = self.np_random.integers(
+            self.cfg.window_size,
+            max_start
+        )
         
-        # On commence après window_size pour avoir assez d'historique
-        self._current_step    = self.cfg.window_size
         self._position        = 0
-        self._entry_price     = 0.0
         self._cash            = self.cfg.initial_capital
         self._shares          = 0.0
         self._portfolio_value = self.cfg.initial_capital
         self._peak_value      = self.cfg.initial_capital
-        
+        self._entry_price     = 0.0
+
         self._reset_history()
+        return self._get_observation(), self._get_info()
         
-        obs  = self._get_observation()
-        info = self._get_info()
-        
-        return obs, info
-    
     
     # ============================================================
     # STEP
@@ -525,7 +524,7 @@ class TradingEnv(gym.Env):
 if __name__ == "__main__":
     
     # Import du data loader (fichier précédent)
-    from feature_engineering import load_data, DataConfig
+    from data_loader import load_data, DataConfig
     
     # 1. Chargement des données
     cfg_data = DataConfig(ticker="AAPL")
