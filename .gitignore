@@ -7,3 +7,9 @@ __pycache__/
 .env
 
 *.pdf
+# … sauf le rapport compilé (livrable du repo)
+!reports/rapport_drl_portfolio.pdf
+*.log
+*.csv
+*.claude/
+

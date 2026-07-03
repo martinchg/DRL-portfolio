@@ -14,28 +14,70 @@ from collections import deque
 # ============================================================
 @dataclass
 class EnvConfig:
-    # Portfolio
-    initial_capital:   float = 10_000.0   # Capital de départ ($)
-    transaction_cost:  float = 0.002      # 0.2% par trade (frais réalistes)
-    
-    # Observation
-    window_size:       int   = 10         # Nombre de jours que l'agent "voit"
-    
-    # Reward
-    reward_scaling:    float = 100.0      # Scaling du reward pour stabiliser PPO
-    
-    # Risk Management
-    max_drawdown_pct:  float = 0.25       # Stop si drawdown > 25%
-    
-    # Actions
-    # 0 = Hold | 1 = Buy (long 100%) | 2 = Sell (flat)
-    n_actions:         int   = 3
+    # ── Paramètres financiers ─────────────────────────────────────────
+    # [GESTIONNAIRE] Capital initial de simulation.
+    # N'affecte pas l'apprentissage (les returns sont normalisés),
+    # mais change les valeurs absolues affichées dans les graphes.
+    initial_capital:   float = 10_000.0
+
+    # [GESTIONNAIRE] Coût de transaction par trade (aller simple).
+    # 0.001 = 0.1% (courtier discount) | 0.002 = 0.2% (réaliste avec spread)
+    # 0.005 = 0.5% (marché moins liquide)
+    # Augmenter ce paramètre pénalise davantage l'overtrading.
+    transaction_cost:  float = 0.002
+
+    # ── Paramètres d'observation ──────────────────────────────────────
+    # [GESTIONNAIRE] Nombre de jours historiques visibles par l'agent.
+    # 5  = vue très court-terme (day trading)
+    # 10 = par défaut — équilibre signal/bruit
+    # 20 = vue moyen-terme, capte mieux les tendances mais augmente la taille des obs
+    # ⚠️  Changer ce paramètre change la taille de l'observation space → réentraîner
+    window_size:       int   = 10
+
+    # ── Paramètres du reward ─────────────────────────────────────────
+    # [TECHNIQUE] Facteur multiplicatif appliqué à l'alpha avant de le passer à PPO.
+    # PPO fonctionne mieux avec des rewards dans [-5, 5].
+    # Sur des returns journaliers (~±1%), ×100 donne un signal dans [-1, 1] avant clipping.
+    # Ne pas toucher sauf si les rewards sont trop petits (<0.01) ou trop grands (>10).
+    reward_scaling:    float = 100.0
+
+    # ── Gestion du risque ────────────────────────────────────────────
+    # [GESTIONNAIRE] Drawdown maximum toléré avant de terminer l'épisode.
+    # 0.10 = 10% (très strict, force l'agent à couper rapidement ses pertes)
+    # 0.25 = 25% (par défaut, réaliste pour un actif volatil)
+    # 0.50 = 50% (permissif, laisse l'agent traverser des baisses profondes)
+    # Un seuil plus bas force l'agent à apprendre à gérer le risque,
+    # mais raccourcit les épisodes → moins d'expérience par episode.
+    max_drawdown_pct:  float = 0.25
+
+    # ── Actions ──────────────────────────────────────────────────────
+    # 0 = Hold  → ne rien faire (reste dans la position courante)
+    # 1 = Long  → aller long 100% (ou couvrir le short et aller long)
+    # 2 = Flat  → fermer toute position (cash)
+    # 3 = Short → vendre à découvert 100% (ou fermer le long et shorter)
+    #
+    # Le short permet de PROFITER des baisses de marché.
+    # Sans short, l'agent ne peut que "éviter" les baisses (rester flat).
+    # Avec short, l'agent peut gagner de l'argent pendant les baisses.
+    #
+    # [GESTIONNAIRE] Mettre n_actions = 3 pour désactiver le short (= ancien mode)
+    # ⚠️  Changer ce paramètre nécessite de réentraîner le modèle
+    n_actions:         int   = 4
+
+    # ── Features observées ───────────────────────────────────────────
+    # None = FEATURES de base (obs de taille 52). Tuple de noms pour une
+    # liste custom, ex. base + régime → 72 (cf. data_loader.REGIME_FEATURES).
+    # ⚠️  'log_returns' doit rester en position 0 (_get_recent_volatility).
+    # ⚠️  Changer la liste change l'observation space → réentraîner.
+    features:          Optional[Tuple[str, ...]] = None
 
 
 FEATURES = [
     'log_returns',
     'volatility',
-    'rsi'
+    'rsi',
+    'macd_norm',
+    'momentum_5',
 ]
 
 
@@ -70,17 +112,18 @@ class TradingEnv(gym.Env):
         
         self.cfg         = cfg
         self.render_mode = render_mode
-        
+        self.features_list = list(cfg.features) if cfg.features else list(FEATURES)
+
         # ---- Données ----
-        self._validate_data(data)
+        self._validate_data(data, self.features_list)
         self.data        = data.reset_index(drop=True)
         self.prices      = self.data['price'].values.astype(np.float32)
-        self.features    = self.data[FEATURES].values.astype(np.float32)
+        self.features    = self.data[self.features_list].values.astype(np.float32)
         self.n_steps     = len(self.data)
-        
+
         # ---- Spaces ----
         # Observation : (window_size × n_features) + portfolio_state
-        n_obs = cfg.window_size * len(FEATURES) + 2  # +2 : position + pnl
+        n_obs = cfg.window_size * len(self.features_list) + 2  # +2 : position + pnl
         
         self.observation_space = spaces.Box(
             low   = -np.inf,
@@ -91,22 +134,40 @@ class TradingEnv(gym.Env):
         
         self.action_space = spaces.Discrete(cfg.n_actions)
         
+        # ---- Segments (multi-ticker) ----
+        # Si la donnée contient une colonne segment_id, on divise les épisodes
+        # par segment pour éviter de croiser les frontières entre tickers.
+        if 'segment_id' in self.data.columns:
+            self._segments = []
+            for sid in sorted(self.data['segment_id'].unique()):
+                idxs = self.data.index[self.data['segment_id'] == sid].tolist()
+                seg_start = idxs[0] + cfg.window_size
+                seg_end   = idxs[-1] - 1
+                if seg_end - seg_start > 50:          # segment assez long
+                    self._segments.append((seg_start, seg_end))
+        else:
+            self._segments = None
+
         # ---- Historique pour render ----
         self._reset_history()
-        
+
         # ---- State interne ----
         self._current_step   = 0
-        self._position       = 0        # 0 = flat | 1 = long
+        self._seg_end        = self.n_steps - 1  # fin d'épisode courante
+        self._position       = 0        # -1 = short | 0 = flat | 1 = long
         self._entry_price    = 0.0
         self._portfolio_value = cfg.initial_capital
         self._peak_value     = cfg.initial_capital
         self._cash           = cfg.initial_capital
-        self._shares         = 0.0
-        
+        self._shares         = 0.0     # positif si long, négatif si short
+
         print(f"✅ TradingEnv initialisé")
         print(f"   Steps disponibles : {self.n_steps - cfg.window_size}")
         print(f"   Observation shape : {self.observation_space.shape}")
-        print(f"   Actions           : {{0: Hold, 1: Buy, 2: Sell}}")
+        if cfg.n_actions == 4:
+            print(f"   Actions           : {{0: Hold, 1: Long, 2: Flat, 3: Short}}")
+        else:
+            print(f"   Actions           : {{0: Hold, 1: Buy, 2: Sell}}")
     
     
     # ============================================================
@@ -120,12 +181,34 @@ class TradingEnv(gym.Env):
         
         super().reset(seed=seed)
 
-        # ✅ Point de départ aléatoire
-        max_start = self.n_steps - self.cfg.window_size - 100
-        self._current_step = self.np_random.integers(
-            self.cfg.window_size,
-            max_start
-        )
+        # options={"random_start": False} → départ déterministe au début des
+        # données, épisode sur TOUT le split. Utilisé par evaluate.py pour des
+        # métriques reproductibles. Défaut True (entraînement : départs variés).
+        random_start = True
+        if options is not None:
+            random_start = options.get("random_start", True)
+
+        # Point de départ — par segment si multi-ticker
+        if self._segments:
+            if random_start:
+                seg_idx = int(self.np_random.integers(0, len(self._segments)))
+            else:
+                seg_idx = 0
+            seg_start, seg_end = self._segments[seg_idx]
+            self._seg_end = seg_end
+            if random_start:
+                buffer = min(100, (seg_end - seg_start) // 2)
+                self._current_step = int(self.np_random.integers(seg_start, seg_end - buffer))
+            else:
+                self._current_step = seg_start
+        else:
+            self._seg_end = self.n_steps - 1
+            max_start = self.n_steps - self.cfg.window_size - 100
+            if random_start and max_start > self.cfg.window_size:
+                self._current_step = int(self.np_random.integers(self.cfg.window_size, max_start))
+            else:
+                # Données trop courtes pour un départ aléatoire → départ fixe
+                self._current_step = self.cfg.window_size
         
         self._position        = 0
         self._cash            = self.cfg.initial_capital
@@ -144,24 +227,27 @@ class TradingEnv(gym.Env):
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
         
         assert self.action_space.contains(action), f"Action invalide : {action}"
-        
+
+        prev_price    = self.prices[self._current_step - 1]
         current_price = self.prices[self._current_step]
         prev_value    = self._portfolio_value
-        
+
         # --- Exécution de l'action ---
         transaction_cost = self._execute_action(action, current_price)
-        
+
         # --- Mise à jour de la valeur du portfolio ---
         self._portfolio_value = self._cash + self._shares * current_price
-        
+
         # --- Mise à jour du peak (pour drawdown) ---
         self._peak_value = max(self._peak_value, self._portfolio_value)
-        
+
         # --- Calcul du reward ---
         reward = self._compute_reward(
             prev_value       = prev_value,
             current_value    = self._portfolio_value,
-            transaction_cost = transaction_cost
+            transaction_cost = transaction_cost,
+            prev_price       = prev_price,
+            current_price    = current_price,
         )
         
         # --- Logging ---
@@ -172,7 +258,7 @@ class TradingEnv(gym.Env):
         
         # --- Conditions de fin d'épisode ---
         terminated = self._is_terminated()
-        truncated  = self._current_step >= self.n_steps - 1
+        truncated  = self._current_step >= self._seg_end
         
         obs  = self._get_observation()
         info = self._get_info()
@@ -185,34 +271,122 @@ class TradingEnv(gym.Env):
     # ============================================================
     def _execute_action(self, action: int, price: float) -> float:
         """
-        Exécute l'action et retourne le coût de transaction.
-        
-        0 = Hold → ne rien faire
-        1 = Buy  → investir tout le cash disponible
-        2 = Sell → liquider toute la position
+        Exécute l'action et retourne le coût de transaction total.
+
+        ─── Actions (n_actions = 4) ────────────────────────────────────
+        0 = HOLD  → ne rien faire, reste dans la position courante
+        1 = LONG  → aller long 100%
+                     • si flat  → achète des actions
+                     • si short → couvre le short PUIS achète (2 trades)
+                     • si long  → no-op (déjà là)
+        2 = FLAT  → fermer toute position, aller en cash
+                     • si long  → vend les actions
+                     • si short → couvre le short (rachète les actions empruntées)
+                     • si flat  → no-op
+        3 = SHORT → vendre à découvert 100%
+                     • si flat  → ouvre un short
+                     • si long  → vend les actions PUIS ouvre un short (2 trades)
+                     • si short → no-op (déjà là)
+
+        ─── Mécanique du short ─────────────────────────────────────────
+        Emprunter N actions et les vendre au prix P0 :
+          _shares = -N  (négatif = dette de shares)
+          _cash  += N × P0  (reçoit les proceeds de la vente à découvert)
+
+        Portfolio value = _cash + _shares × P_current
+                        = (initial + N×P0) + (-N) × P_current
+                        = initial + N × (P0 - P_current)
+        → Profit si P_current < P0 ✅ (prix a baissé)
+        → Perte  si P_current > P0 ✅ (prix a monté)
+
+        ─── Compatibilité mode 3 actions ───────────────────────────────
+        Si n_actions = 3, actions 1=Buy, 2=Sell fonctionnent identiquement
+        (action 3 ne sera jamais choisie par l'agent).
         """
         cost = 0.0
-        
-        # BUY : on est flat et on veut acheter
-        if action == 1 and self._position == 0:
-            # Nombre de shares achetables (frais inclus)
-            cost        = self._cash * self.cfg.transaction_cost
-            investable  = self._cash - cost
-            self._shares    = investable / price
-            self._cash      = 0.0
-            self._position  = 1
-            self._entry_price = price
-        
-        # SELL : on est long et on veut vendre
-        elif action == 2 and self._position == 1:
-            proceeds    = self._shares * price
-            cost        = proceeds * self.cfg.transaction_cost
-            self._cash      = proceeds - cost
-            self._shares    = 0.0
-            self._position  = 0
-            self._entry_price = 0.0
-        
-        # HOLD ou action redondante → rien
+
+        # ── ACTION 0 : HOLD ─────────────────────────────────────────
+        if action == 0:
+            return 0.0
+
+        # ── ACTION 1 : GO LONG ──────────────────────────────────────
+        elif action == 1:
+            if self._position == 1:
+                return 0.0  # Déjà long, no-op
+
+            # Étape 1 : couvrir le short si nécessaire
+            if self._position == -1:
+                cover_cost       = abs(self._shares) * price * self.cfg.transaction_cost
+                # Racheter les shares empruntées (rembourse la dette)
+                self._cash      += self._shares * price   # _shares < 0 → soustrait du cash
+                self._cash      -= cover_cost
+                self._shares     = 0.0
+                self._position   = 0
+                self._entry_price = 0.0
+                cost            += cover_cost
+
+            # Étape 2 : acheter (si on a du cash)
+            if self._cash > 0 and self._position == 0:
+                buy_cost         = self._cash * self.cfg.transaction_cost
+                investable       = self._cash - buy_cost
+                self._shares     = investable / price
+                self._cash       = 0.0
+                self._position   = 1
+                self._entry_price = price
+                cost            += buy_cost
+
+        # ── ACTION 2 : GO FLAT (SELL ou COVER) ──────────────────────
+        elif action == 2:
+            if self._position == 0:
+                return 0.0  # Déjà flat, no-op
+
+            if self._position == 1:
+                # Vendre les actions (long → flat)
+                proceeds         = self._shares * price
+                sell_cost        = proceeds * self.cfg.transaction_cost
+                self._cash       = proceeds - sell_cost
+                self._shares     = 0.0
+                self._position   = 0
+                self._entry_price = 0.0
+                cost            += sell_cost
+
+            elif self._position == -1:
+                # Couvrir le short (racheter les shares empruntées)
+                cover_cost       = abs(self._shares) * price * self.cfg.transaction_cost
+                self._cash      += self._shares * price   # _shares < 0
+                self._cash      -= cover_cost
+                self._shares     = 0.0
+                self._position   = 0
+                self._entry_price = 0.0
+                cost            += cover_cost
+
+        # ── ACTION 3 : GO SHORT ─────────────────────────────────────
+        elif action == 3:
+            if self._position == -1:
+                return 0.0  # Déjà short, no-op
+
+            # Étape 1 : fermer le long si nécessaire
+            if self._position == 1:
+                proceeds         = self._shares * price
+                sell_cost        = proceeds * self.cfg.transaction_cost
+                self._cash       = proceeds - sell_cost
+                self._shares     = 0.0
+                self._position   = 0
+                self._entry_price = 0.0
+                cost            += sell_cost
+
+            # Étape 2 : ouvrir le short
+            if self._cash > 0 and self._position == 0:
+                short_cost       = self._cash * self.cfg.transaction_cost
+                investable       = self._cash - short_cost
+                n_shares         = investable / price
+                self._shares     = -n_shares               # négatif = short
+                self._cash      -= short_cost              # frais déduits du cash (symétrie avec le long)
+                self._cash      += n_shares * price        # reçoit les proceeds
+                self._position   = -1
+                self._entry_price = price
+                cost            += short_cost
+
         return cost
     
     
@@ -223,49 +397,51 @@ class TradingEnv(gym.Env):
         self,
         prev_value:       float,
         current_value:    float,
-        transaction_cost: float
+        transaction_cost: float,
+        prev_price:       float,
+        current_price:    float,
     ) -> float:
         """
-        Reward = Sharpe-like reward
-        
+        Reward = Alpha vs Buy & Hold par step
+
         Formule :
-            r_t = (V_t - V_{t-1}) / V_{t-1}   ← rendement du portfolio
-            reward = r_t / σ_recent             ← ajusté par la volatilité
-            - pénalité_transaction              ← décourage le overtrading
-        
+            portfolio_return_t = (V_t - V_{t-1}) / V_{t-1}
+            bh_return_t        = (P_t - P_{t-1}) / P_{t-1}
+            alpha_t            = portfolio_return_t - bh_return_t
+
         Pourquoi ce reward ?
-        - Encourage les rendements RÉGULIERS (pas juste les gros gains)
-        - Pénalise les pertes brutales
-        - Décourage le trading excessif (frais)
+        - Signal direct pour BATTRE le marché, pas juste monter avec lui
+        - Être FLAT quand le marché baisse → alpha > 0 (récompense)
+        - Être FLAT quand le marché monte → alpha < 0 (pénalité)
+        - Être LONG track le marché      → alpha ≈ 0 (neutre)
+        - L'agent apprend à TIMER le marché, pas à juste hold
+        - Élimine le biais "toujours Buy" de la reward Sharpe-like précédente
         """
-        # Rendement brut du portefeuille
+        # Rendement du portefeuille sur ce step
         portfolio_return = (current_value - prev_value) / (prev_value + 1e-8)
-        
-        # Volatilité récente sur la fenêtre d'observation
-        recent_vol = self._get_recent_volatility()
-        
-        # Sharpe-like : rendement / risque
-        if recent_vol > 1e-8:
-            sharpe_reward = portfolio_return / recent_vol
-        else:
-            sharpe_reward = portfolio_return
-        
-        # Pénalité de transaction (normalisée)
+
+        # Rendement du marché sur ce step (référence Buy & Hold)
+        bh_step_return = (current_price - prev_price) / (prev_price + 1e-8)
+
+        # Alpha : l'agent fait-il mieux que le marché à ce step ?
+        alpha = portfolio_return - bh_step_return
+
+        # Pénalité de transaction (décourage l'overtrading)
         tx_penalty = (
             transaction_cost / self.cfg.initial_capital
         ) * self.cfg.reward_scaling
-        
-        # Pénalité drawdown progressif
+
+        # Pénalité drawdown légère (gestion du risque)
         drawdown = (self._peak_value - current_value) / (self._peak_value + 1e-8)
-        drawdown_penalty = drawdown * 0.1  # Légère pénalité continue
-        
+        drawdown_penalty = drawdown * 0.05
+
         reward = (
-            sharpe_reward   * self.cfg.reward_scaling
+            alpha * self.cfg.reward_scaling
             - tx_penalty
             - drawdown_penalty
         )
-        
-        return float(np.clip(reward, -10.0, 10.0))  # Clipping pour PPO
+
+        return float(np.clip(reward, -10.0, 10.0))
     
     
     # ============================================================
@@ -284,17 +460,20 @@ class TradingEnv(gym.Env):
         window = self.features[start:end].flatten()   # shape: (window×features,)
         
         # État du portfolio normalisé
-        current_price   = self.prices[self._current_step]
-        unrealized_pnl  = 0.0
-        
-        if self._position == 1 and self._entry_price > 0:
-            unrealized_pnl = (
-                (current_price - self._entry_price) / self._entry_price
-            )
-        
+        current_price  = self.prices[self._current_step]
+        unrealized_pnl = 0.0
+
+        if self._entry_price > 0:
+            if self._position == 1:
+                # Long : profit si prix monte
+                unrealized_pnl = (current_price - self._entry_price) / self._entry_price
+            elif self._position == -1:
+                # Short : profit si prix baisse
+                unrealized_pnl = (self._entry_price - current_price) / self._entry_price
+
         portfolio_state = np.array([
-            float(self._position),   # 0 ou 1
-            unrealized_pnl           # PnL latent normalisé
+            float(self._position),   # -1 (short) | 0 (flat) | 1 (long)
+            unrealized_pnl           # PnL latent normalisé (positif = en gain)
         ], dtype=np.float32)
         
         obs = np.concatenate([window, portfolio_state])
@@ -382,7 +561,7 @@ class TradingEnv(gym.Env):
         self.history["prices"].append(price)
         self.history["actions"].append(action)
         self.history["rewards"].append(reward)
-        if action in [1, 2]:
+        if action in [1, 2, 3]:
             self.history["n_trades"] += 1
     
     
@@ -390,8 +569,8 @@ class TradingEnv(gym.Env):
     # VALIDATION
     # ============================================================
     @staticmethod
-    def _validate_data(data: pd.DataFrame):
-        required = FEATURES + ['price']
+    def _validate_data(data: pd.DataFrame, features_list=None):
+        required = (features_list if features_list is not None else FEATURES) + ['price']
         missing  = [c for c in required if c not in data.columns]
         if missing:
             raise ValueError(f"Colonnes manquantes : {missing}")
@@ -434,15 +613,19 @@ class TradingEnv(gym.Env):
             color='gray', linestyle=':', linewidth=1
         )
         
-        # Markers buy/sell
-        buy_idx  = np.where(actions == 1)[0]
-        sell_idx = np.where(actions == 2)[0]
-        ax1.scatter(buy_idx,  portfolio[buy_idx],
-                    marker='^', color='green', s=80,
-                    zorder=5, label='Buy')
-        ax1.scatter(sell_idx, portfolio[sell_idx],
-                    marker='v', color='red',   s=80,
-                    zorder=5, label='Sell')
+        # Markers long/flat/short
+        long_idx  = np.where(actions == 1)[0]
+        flat_idx  = np.where(actions == 2)[0]
+        short_idx = np.where(actions == 3)[0]
+        ax1.scatter(long_idx,  portfolio[long_idx],
+                    marker='^', color='green',  s=80,
+                    zorder=5, label='Go Long')
+        ax1.scatter(flat_idx,  portfolio[flat_idx],
+                    marker='s', color='gray',   s=60,
+                    zorder=5, label='Go Flat')
+        ax1.scatter(short_idx, portfolio[short_idx],
+                    marker='v', color='orange', s=80,
+                    zorder=5, label='Go Short')
         
         final_return = (portfolio[-1] - self.cfg.initial_capital) \
                        / self.cfg.initial_capital * 100
@@ -473,12 +656,12 @@ class TradingEnv(gym.Env):
         
         # --- Subplot 3 : Actions ---
         ax3 = fig.add_subplot(gs[2])
-        action_colors = {0: '#95a5a6', 1: '#2ecc71', 2: '#e74c3c'}
+        action_colors = {0: '#95a5a6', 1: '#2ecc71', 2: '#3498db', 3: '#e74c3c'}
         bar_colors    = [action_colors[a] for a in actions]
         ax3.bar(range(len(actions)), actions,
                 color=bar_colors, alpha=0.8, width=1.0)
-        ax3.set_yticks([0, 1, 2])
-        ax3.set_yticklabels(['Hold', 'Buy', 'Sell'])
+        ax3.set_yticks([0, 1, 2, 3])
+        ax3.set_yticklabels(['Hold', 'Long', 'Flat', 'Short'])
         ax3.set_title('Actions de l\'Agent')
         ax3.set_xlabel('Steps')
         ax3.grid(alpha=0.3, axis='x')
@@ -493,26 +676,22 @@ class TradingEnv(gym.Env):
     
     def _print_episode_stats(self, portfolio: np.ndarray, bh: np.ndarray):
         """Affiche les métriques clés de l'épisode."""
-        
-        returns      = np.diff(portfolio) / portfolio[:-1]
-        sharpe       = (
-            np.mean(returns) / (np.std(returns) + 1e-8)
-        ) * np.sqrt(252)
-        
+
         peak         = np.maximum.accumulate(portfolio)
         drawdowns    = (peak - portfolio) / (peak + 1e-8)
         max_dd       = np.max(drawdowns)
-        
+
         total_return = (portfolio[-1] - portfolio[0]) / portfolio[0]
         bh_return    = (bh[-1] - bh[0]) / bh[0]
-        
+        alpha        = total_return - bh_return
+
         print("\n" + "="*45)
         print("  EPISODE STATS")
         print("="*45)
         print(f"  Portfolio Final  : ${portfolio[-1]:,.2f}")
-        print(f"  Total Return     : {total_return:+.2%}")
+        print(f"  Agent Return     : {total_return:+.2%}")
         print(f"  Buy & Hold       : {bh_return:+.2%}")
-        print(f"  Sharpe Ratio     : {sharpe:.3f}")
+        print(f"  Alpha            : {alpha:+.2%}  {'✅' if alpha > 0 else '❌'}")
         print(f"  Max Drawdown     : {max_dd:.2%}")
         print(f"  Nb Trades        : {self.history['n_trades']}")
         print("="*45 + "\n")
@@ -528,7 +707,7 @@ if __name__ == "__main__":
     
     # 1. Chargement des données
     cfg_data = DataConfig(ticker="AAPL")
-    train, val, test, scaler, gmm = load_data(cfg_data)
+    train, val, test, scaler = load_data(cfg_data)
     
     # 2. Init environnement
     cfg_env = EnvConfig(

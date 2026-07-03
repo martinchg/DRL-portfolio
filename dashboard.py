@@ -21,6 +21,7 @@ from environment import TradingEnv, EnvConfig
 # DRL imports
 try:
     from stable_baselines3 import PPO
+    from evaluate import load_model_and_norm
     DRL_AVAILABLE = True
 except ImportError:
     DRL_AVAILABLE = False
@@ -668,14 +669,46 @@ else:
             # --- Section de chargement du modèle ---
             st.markdown("### 🤖 Chargement du Modèle")
             
-            model_file = st.file_uploader(
-                "Télécharge le fichier modèle (.zip)",
-                type=['zip'],
-                help="Fichier best_model.zip généré par train.py"
+            model_source = st.radio(
+                "Source du modèle",
+                ["📁 Modèles locaux", "⬆️ Upload manuel"],
+                horizontal=True,
             )
+
+            model_file   = None
+            vecnorm_file = None
+            local_path   = None
+
+            if model_source == "📁 Modèles locaux":
+                _root = os.path.dirname(os.path.abspath(__file__))
+                local_models = {
+                    "Single (AAPL)"     : os.path.join(_root, "models", "ppo_single", "best_model.zip"),
+                    "Multi (5 tickers)" : os.path.join(_root, "models", "ppo_multi", "best_model.zip"),
+                }
+                local_models = {k: v for k, v in local_models.items() if os.path.exists(v)}
+                if local_models:
+                    model_choice = st.selectbox("Modèle entraîné", list(local_models.keys()))
+                    local_path   = local_models[model_choice]
+                    st.caption("✅ `vec_normalize.pkl` chargé automatiquement depuis le même dossier")
+                else:
+                    st.info("Aucun modèle local trouvé — lance `python train.py` d'abord.")
+            else:
+                model_file = st.file_uploader(
+                    "Fichier modèle (.zip)",
+                    type=['zip'],
+                    help="Fichier best_model.zip généré par train.py"
+                )
+                vecnorm_file = st.file_uploader(
+                    "vec_normalize.pkl (fortement recommandé)",
+                    type=['pkl'],
+                    help="Stats de normalisation des observations — sans lui, "
+                         "le modèle reçoit des obs brutes et les résultats sont faussés"
+                )
+
+            model_ready = (local_path is not None) or (model_file is not None)
             
-            if model_file is None:
-                st.info("👆 Charge un modèle entraîné pour voir les résultats DRL")
+            if not model_ready:
+                st.info("👆 Sélectionne ou charge un modèle entraîné pour voir les résultats DRL")
                 
                 stoggle("💡 Comment obtenir un modèle entraîné ?",
                     """
@@ -708,7 +741,9 @@ else:
                             "Taille de la Fenêtre",
                             min_value=5,
                             max_value=30,
-                            value=10
+                            value=10,
+                            help="⚠️ Doit correspondre au window_size utilisé à "
+                                 "l'entraînement (10 par défaut), sinon le modèle plante."
                         )
                         n_episodes = st.slider(
                             "Nombre d'Épisodes d'Évaluation",
@@ -735,13 +770,28 @@ else:
                             with tempfile.TemporaryDirectory() as tmpdir:
                                 zip_path = os.path.join(tmpdir, "model.zip")
                                 
-                                # Sauvegarder le fichier uploadé
-                                with open(zip_path, 'wb') as f:
-                                    f.write(model_file.read())
+                                # Modèle local → pkl adjacent trouvé automatiquement.
+                                # Upload → on écrit zip + pkl dans le même tmpdir.
+                                if local_path is not None:
+                                    zip_path = local_path
+                                else:
+                                    with open(zip_path, 'wb') as f:
+                                        f.write(model_file.read())
+                                    if vecnorm_file is not None:
+                                        vec_path = os.path.join(tmpdir, "vec_normalize.pkl")
+                                        with open(vec_path, 'wb') as f:
+                                            f.write(vecnorm_file.read())
                                 
-                                # Charger le modèle directement depuis le zip
-                                # PPO.load() accepte un fichier zip directement
-                                model = PPO.load(zip_path)
+                                # Charge le modèle + le VecNormalize adjacent :
+                                # les obs DOIVENT être normalisées comme à l'entraînement
+                                model, vec_normalize = load_model_and_norm(
+                                    zip_path, test, cfg_env
+                                )
+                                if vec_normalize is None:
+                                    st.warning(
+                                        "⚠️ vec_normalize.pkl introuvable : le modèle reçoit "
+                                        "des observations brutes, résultats non représentatifs."
+                                    )
                                 
                                 # Évaluation sur plusieurs épisodes
                                 all_portfolios = []
@@ -763,8 +813,14 @@ else:
                                     done = False
                                     
                                     while not done:
-                                        action, _ = model.predict(obs, deterministic=True)
-                                        obs, _, terminated, truncated, _ = env.step(action)
+                                        if vec_normalize is not None:
+                                            obs_input = vec_normalize.normalize_obs(
+                                                np.array([obs], dtype=np.float32)
+                                            )[0]
+                                        else:
+                                            obs_input = obs
+                                        action, _ = model.predict(obs_input, deterministic=True)
+                                        obs, _, terminated, truncated, _ = env.step(int(action))
                                         done = terminated or truncated
                                     
                                     # Collecter les résultats
@@ -935,7 +991,7 @@ else:
                         # Compter les actions sur tous les épisodes
                         all_actions_flat = np.concatenate(results['actions'])
                         action_counts = pd.Series(all_actions_flat).value_counts().sort_index()
-                        action_labels = {0: 'Hold', 1: 'Buy', 2: 'Sell'}
+                        action_labels = {0: 'Hold', 1: 'Long', 2: 'Flat', 3: 'Short'}
                         
                         fig_actions = go.Figure(go.Bar(
                             x=[action_labels[i] for i in action_counts.index],
@@ -1000,34 +1056,44 @@ else:
                     portfolio_ep1 = results['portfolios'][0]
                     actions_ep1 = results['actions'][0]
                     
-                    buy_indices = np.where(actions_ep1 == 1)[0]
-                    sell_indices = np.where(actions_ep1 == 2)[0]
-                    
+                    long_indices  = np.where(actions_ep1 == 1)[0]
+                    flat_indices  = np.where(actions_ep1 == 2)[0]
+                    short_indices = np.where(actions_ep1 == 3)[0]
+
                     fig_trades = go.Figure()
-                    
+
                     fig_trades.add_trace(go.Scatter(
                         y=portfolio_ep1,
                         mode='lines',
                         name='Portfolio Value',
                         line=dict(color='#2ecc71', width=2)
                     ))
-                    
-                    if len(buy_indices) > 0:
+
+                    if len(long_indices) > 0:
                         fig_trades.add_trace(go.Scatter(
-                            x=buy_indices,
-                            y=portfolio_ep1[buy_indices],
+                            x=long_indices,
+                            y=portfolio_ep1[long_indices],
                             mode='markers',
-                            name='Buy',
+                            name='Long',
                             marker=dict(color='green', size=12, symbol='triangle-up')
                         ))
-                    
-                    if len(sell_indices) > 0:
+
+                    if len(flat_indices) > 0:
                         fig_trades.add_trace(go.Scatter(
-                            x=sell_indices,
-                            y=portfolio_ep1[sell_indices],
+                            x=flat_indices,
+                            y=portfolio_ep1[flat_indices],
                             mode='markers',
-                            name='Sell',
-                            marker=dict(color='red', size=12, symbol='triangle-down')
+                            name='Flat',
+                            marker=dict(color='gray', size=10, symbol='square')
+                        ))
+
+                    if len(short_indices) > 0:
+                        fig_trades.add_trace(go.Scatter(
+                            x=short_indices,
+                            y=portfolio_ep1[short_indices],
+                            mode='markers',
+                            name='Short',
+                            marker=dict(color='orange', size=12, symbol='triangle-down')
                         ))
                     
                     fig_trades.update_layout(
@@ -1048,11 +1114,13 @@ else:
                     # --- Table des Trades ---
                     st.markdown("##### 📋 Liste des Trades (Episode 1)")
                     
+                    action_display = {1: 'Long 🟢', 2: 'Flat ⬜', 3: 'Short 🟠'}
+                    trade_indices  = np.concatenate([long_indices, flat_indices, short_indices])
                     trade_list = []
-                    for idx in np.concatenate([buy_indices, sell_indices]):
+                    for idx in trade_indices:
                         trade_list.append({
                             'Step': int(idx),
-                            'Action': 'Buy 🟢' if actions_ep1[idx] == 1 else 'Sell 🔴',
+                            'Action': action_display.get(int(actions_ep1[idx]), '?'),
                             'Portfolio Value': f"${portfolio_ep1[idx]:,.2f}",
                             'Price': f"${results['prices'][0][idx]:.2f}"
                         })

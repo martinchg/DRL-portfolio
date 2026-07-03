@@ -19,34 +19,90 @@ warnings.filterwarnings('ignore')
 # ============================================================
 @dataclass
 class DataConfig:
-    # Single ticker
+    # ── Données ──────────────────────────────────────────────────────
+    # [GESTIONNAIRE] Ticker pour le mode single-asset.
+    # Exemples : "AAPL", "MSFT", "SPY", "BTC-USD", "GLD"
     ticker      : str   = "AAPL"
-    start_date  : str   = "2018-01-01"
+
+    # [GESTIONNAIRE] Période d'historique utilisée pour entraîner ET tester.
+    # Plus la période est longue → plus de données → meilleure généralisation.
+    # La période doit contenir plusieurs cycles de marché (bull + bear).
+    #
+    # Recommandations :
+    # "2010-01-01" → "2023-01-01" = 13 ans ✅ (défaut)
+    #   Train 2010-2019 : correction 2011, bear 2015, bear 2018
+    #   Val   2019-2021 : COVID crash + recovery (agent apprend à shorter)
+    #   Test  2021-2023 : bull 2021 + bear 2022
+    #
+    # "2015-01-01" → "2023-01-01" = 8 ans
+    #   Moins de data mais inclut quand même COVID
+    #
+    # "2018-01-01" → "2023-01-01" = 5 ans (ancien défaut, trop court)
+    #   Test = uniquement 2022 bear → très difficile à battre sans short
+    start_date  : str   = "2010-01-01"
     end_date    : str   = "2023-01-01"
 
-    # Multi-ticker
+    # [GESTIONNAIRE] Liste de tickers pour l'entraînement multi-asset.
+    # Diversifier les actifs force l'agent à apprendre des patterns généraux
+    # plutôt que de mémoriser la trajectoire d'un seul actif.
+    # ⚠️  Limitation connue : les épisodes peuvent croiser les frontières entre actifs
+    #    dans les données concaténées → entraînement imparfait mais acceptable.
     tickers     : List[str] = field(default_factory=lambda: [
         "AAPL", "MSFT", "GOOGL", "SPY", "TSLA"
     ])
-    multi_ticker : bool = False   # True = entraîne sur plusieurs actifs
+    multi_ticker : bool = False
 
-    # Split
+    # ── Découpage train/val/test ──────────────────────────────────────
+    # [GESTIONNAIRE] Proportions du split temporel (chronologique strict).
+    # train  = premières données (l'agent apprend dessus)
+    # val    = données intermédiaires (sélection du meilleur modèle)
+    # test   = dernières données (évaluation finale, jamais vu pendant l'entraînement)
+    # Règle : test doit couvrir au moins 6-12 mois pour être significatif.
     train_ratio : float = 0.7
     val_ratio   : float = 0.15
-    # test = 1 - 0.7 - 0.15 = 0.15
+    # test_ratio  = 0.15 (automatique : 1 - train - val)
 
-    # Features
+    # ── Features techniques ───────────────────────────────────────────
+    # [GESTIONNAIRE] Fenêtre pour la volatilité rolling (proxy du risque court-terme).
+    # 10 = volatilité très réactive  |  20 = standard  |  60 = volatilité lente
     vol_window  : int   = 20
+
+    # [GESTIONNAIRE] Fenêtre RSI (Relative Strength Index).
+    # 9  = RSI rapide (day trading)  |  14 = standard  |  21 = RSI lent
     rsi_window  : int   = 14
+
     sma_window  : int   = 50
     max_regimes : int   = 5
+
+    # ── Features de régime (Acte 3) ──────────────────────────────────
+    # [GESTIONNAIRE] Ajoute dist_high_252 et trend_200 aux features.
+    # Motivation : le walk-forward a montré que l'agent ne distingue pas
+    # un krach durable d'un rebond en V — ses features court-terme (10 j)
+    # ne contiennent pas l'information de régime.
+    # ⚠️  Change la taille d'observation (52 → 72) : modèles incompatibles
+    #    avec les anciens ; coûte ~252 jours de warm-up en début de données.
+    regime_features : bool = False
 
 
 FEATURES = [
     'log_returns',
     'volatility',
     'rsi',
+    'macd_norm',
+    'momentum_5',
 ]
+
+# Features de régime (optionnelles, cf. DataConfig.regime_features) :
+# l'état LONG-terme du marché, invisible dans une fenêtre de 10 jours.
+REGIME_FEATURES = [
+    'dist_high_252',   # position vs plus-haut 1 an : -0.3 = 30 % sous le pic
+    'trend_200',       # position vs moyenne mobile 200 j : signe = régime praticien
+]
+
+
+def active_features(cfg) -> list:
+    """Liste des features actives selon la config données."""
+    return FEATURES + (REGIME_FEATURES if cfg.regime_features else [])
 
 
 # ============================================================
@@ -109,6 +165,28 @@ def _build_features(
     rsi = RSIIndicator(close=data['price'], window=cfg.rsi_window)
     data['rsi'] = rsi.rsi() / 100.0
 
+    # D. MACD normalisé (EMA12 - EMA26) / EMA26
+    # Mesure le momentum directionnel : positif = tendance haussière
+    ema12 = data['price'].ewm(span=12, adjust=False).mean()
+    ema26 = data['price'].ewm(span=26, adjust=False).mean()
+    data['macd_norm'] = (ema12 - ema26) / (ema26 + 1e-8)
+
+    # E. Momentum 5 jours (return glissant)
+    # Signal court-terme : combien le prix a bougé sur 5 jours
+    data['momentum_5'] = data['price'].pct_change(5)
+
+    # F/G. Features de régime (optionnelles) — l'état LONG-terme du marché
+    if cfg.regime_features:
+        # F. Distance au plus-haut 1 an : drawdown de l'actif lui-même.
+        #    ≈ 0 → au plus-haut (bull) | -0.3 → 30 % sous le pic (krach/bear)
+        roll_max = data['price'].rolling(252, min_periods=252).max()
+        data['dist_high_252'] = data['price'] / roll_max - 1.0
+
+        # G. Tendance longue : au-dessus/en-dessous de la SMA 200 jours,
+        #    LE proxy de régime des praticiens (golden/death cross).
+        sma200 = data['price'].rolling(200, min_periods=200).mean()
+        data['trend_200'] = data['price'] / sma200 - 1.0
+
     # Drop NaN
     data.dropna(inplace=True)
 
@@ -119,26 +197,29 @@ def _build_features(
 # 3. NORMALISATION
 # ============================================================
 def _scale_features(
-    data      : pd.DataFrame,
-    train_end : int,
+    data         : pd.DataFrame,
+    train_end    : int,
+    feature_cols : list = None,
 ) -> Tuple[pd.DataFrame, RobustScaler]:
     """
     Normalise avec RobustScaler.
     Fit UNIQUEMENT sur le train set.
+    feature_cols : colonnes à scaler (défaut : FEATURES de base).
     """
+    cols   = feature_cols if feature_cols is not None else FEATURES
     data   = data.copy()
     scaler = RobustScaler()
 
     data.loc[
-        data.index[:train_end], FEATURES
+        data.index[:train_end], cols
     ] = scaler.fit_transform(
-        data[FEATURES].iloc[:train_end]
+        data[cols].iloc[:train_end]
     )
 
     data.loc[
-        data.index[train_end:], FEATURES
+        data.index[train_end:], cols
     ] = scaler.transform(
-        data[FEATURES].iloc[train_end:]
+        data[cols].iloc[train_end:]
     )
 
     return data, scaler
@@ -197,8 +278,8 @@ def load_data(
     train_end = int(n * cfg.train_ratio)
     val_end   = int(n * (cfg.train_ratio + cfg.val_ratio))
 
-    # 4. Normalisation
-    data, scaler = _scale_features(data, train_end)
+    # 4. Normalisation (sur toutes les features actives)
+    data, scaler = _scale_features(data, train_end, active_features(cfg))
 
     # 5. Split
     train, val, test = _split(data, cfg)
@@ -245,17 +326,25 @@ def load_multi_ticker_data(
             val_end   = int(n * (cfg.train_ratio + cfg.val_ratio))
 
             # Normalisation fit sur train uniquement
-            data, _ = _scale_features(data, train_end)
+            data, _ = _scale_features(data, train_end, active_features(cfg))
 
             # Split
             train = data.iloc[:train_end].copy()
             val   = data.iloc[train_end:val_end].copy()
             test  = data.iloc[val_end:].copy()
 
-            # Ajoute le ticker comme référence
-            train['ticker'] = ticker
-            val['ticker']   = ticker
-            test['ticker']  = ticker
+            # Ajoute le ticker et un id de segment (pour les épisodes cohérents).
+            # segment_id sur TOUS les splits : sans lui, les épisodes de val/test
+            # traversent les frontières entre tickers → sauts de prix fictifs
+            # (ex : GOOGL ~1000$ → SPY ~300$ = faux crash de -70%) qui polluent
+            # la sélection du best_model par l'EvalCallback.
+            seg_id           = len(trains)
+            train['ticker']  = ticker
+            val['ticker']    = ticker
+            test['ticker']   = ticker
+            train['segment_id'] = seg_id
+            val['segment_id']   = seg_id
+            test['segment_id']  = seg_id
 
             trains.append(train)
             vals.append(val)
@@ -270,16 +359,12 @@ def load_multi_ticker_data(
             print(f"   ❌ {ticker} ignoré : {e}")
             continue
 
-    # Combine
-    train_combined = pd.concat(trains, ignore_index=False)
+    # Combine — ordre temporel conservé par ticker (pas de shuffle)
+    # L'environnement utilise segment_id pour confiner les épisodes
+    # à un seul ticker et éviter de croiser les frontières.
+    train_combined = pd.concat(trains, ignore_index=True)
     val_combined   = pd.concat(vals,   ignore_index=False)
     test_combined  = pd.concat(tests,  ignore_index=False)
-
-    # ✅ Shuffle le train set
-    # → L'agent ne peut plus mémoriser la séquence exacte
-    train_combined = train_combined.sample(
-        frac=1, random_state=42
-    ).reset_index(drop=True)
 
     print(f"\n📊 Dataset combiné :")
     print(f"   Train : {len(train_combined)} jours "
