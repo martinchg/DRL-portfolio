@@ -76,6 +76,28 @@ Si les chiffres changent, mettre aussi à jour la section **Results** du `README
   (`models/ppo_multi/`) que s'il gagne HORS bande de bruit inter-seeds.
 - venv du projet : `.venv/` (Python 3.12) — pas d'autre environnement.
 
+## Chantier suivant acté : Phase 1 diffusion (générateur de scénarios)
+
+Décision (juillet 2026, après l'Acte 3) : avant tout MARL, construire un **DDPM sur
+séries de RENDEMENTS** (jamais de prix bruts) comme **livrable autonome**.
+Motivation : le walk-forward montre que l'agent rate les régimes rares (rebond 2020)
+faute d'en avoir vus à l'entraînement → génération de scénarios = augmentation de
+données motivée par le diagnostic, pas par la mode.
+
+- **Phase 1 SEULE d'abord** : le générateur + son protocole de validation des samples —
+  distribution des rendements vs réel (moments, queues/kurtosis), ACF des rendements
+  (≈ 0) ET des rendements² ou |r| (positive persistante = volatility clustering),
+  éventuellement discriminative score façon TimeGAN. **Aucun branchement RL tant que
+  les samples ne passent pas la validation** — piège n°1 : entraîner l'agent sur du
+  synthétique subtilement irréaliste, atroce à diagnostiquer.
+- Phase 2 (plus tard, si Phase 1 validée) : curriculum réel/synthétique dans le
+  pipeline RL, jugé contre la bande de bruit inter-seeds et le walk-forward.
+- Références DANS le repo : `2303.04137v5.pdf` (Diffusion Policy),
+  `2510.12253v1.pdf` (survey Diffusion×RL), `roadmap.md` phase 2 (TimeGrad,
+  structure `diffusion/` proposée).
+- Conventions inchangées : prédiction écrite avant chaque run, expérience dans son
+  dossier, chapitre de rapport par question fermée, tests pour tout module.
+
 ## Pièges connus
 
 - **Toujours normaliser les observations** avant `model.predict` : passer par
