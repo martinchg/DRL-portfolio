@@ -120,8 +120,14 @@ apprend les quotes optimales sous risque d'inventaire.
 ## Et tes références actuelles ?
 
 - **Diffusion Policy** (2303.04137) et **Diffusion Models for RL** (2510.12253) →
-  nourrissent la **phase 2 de la roadmap de CE projet** (génération de scénarios
-  synthétiques pour l'entraînement), pas un projet séparé.
+  nourrissent la **phase diffusion de CE projet** (génération de scénarios
+  synthétiques pour l'entraînement — cadrage Phase 1 dans CLAUDE.md), pas un projet
+  séparé. **Positionnement CV : c'est ton projet d'IA GÉNÉRATIVE** — la compétence la
+  plus demandée en 2026, et rare combinée à la finance. Formulation prête à l'emploi :
+  « Générateur de scénarios de marché par modèle de diffusion (DDPM), validé
+  statistiquement sur les faits stylisés (queues épaisses, volatility clustering) ».
+  Un candidat qui a fait du RL **et** du génératif appliqués aux marchés, avec un
+  protocole de validation sérieux, coche trois cases à la fois.
 - **State Representation Learning for Deep RL** (2506.17518) → pertinent ici aussi :
   une itération future = améliorer l'observation (features apprises, auto-encodeur
   sur la fenêtre de marché) plutôt que les features à la main. À faire APRÈS le

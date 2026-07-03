@@ -80,6 +80,8 @@ Si les chiffres changent, mettre aussi à jour la section **Results** du `README
 
 Décision (juillet 2026, après l'Acte 3) : avant tout MARL, construire un **DDPM sur
 séries de RENDEMENTS** (jamais de prix bruts) comme **livrable autonome**.
+Positionnement : c'est le volet **IA générative** du portfolio de Martin (modélisation
+générative appliquée aux marchés) — le présenter comme tel dans le rapport et le CV.
 Motivation : le walk-forward montre que l'agent rate les régimes rares (rebond 2020)
 faute d'en avoir vus à l'entraînement → génération de scénarios = augmentation de
 données motivée par le diagnostic, pas par la mode.
