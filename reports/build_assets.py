@@ -737,6 +737,12 @@ timeline_steps = [
      "~21 pts d'alpha viennent de la règle de stop. Alpha de gestion du risque, "
      "pas de signal.",
      "signal ≠ règle de risque"),
+    ("7", "Acte 3 : la barre d'erreur, puis l'échec instructif",
+     "5 seeds d'entraînement : l'alpha AAPL est une loterie (±21 pts, positif 2/5) "
+     "mais la moyenne cross-actifs tient (+14,5 % ± 6,5, positive 5/5). Les features "
+     "de régime, testées contre cette bande : échec cohérent — voir le régime ne "
+     "suffit pas, c'est la récompense qui doit inciter à s'en servir.",
+     "juge de paix : ±6,5 pts"),
 ]
 timeline_html = "".join(
     f'<div class="tl-item reveal"><div class="tl-dot">{n}</div>'
@@ -776,7 +782,8 @@ html = f"""<!DOCTYPE html>
     <span class="chip"><b>{ap["multi_tickers_positifs_5"]}/5</b> actifs à alpha &gt; 0</span>
     <span class="chip"><b>{rob["Multi (5 tickers)"]["beat_bh"]}/5 · {rob["Single (AAPL)"]["beat_bh"]}/5</b> fenêtres &gt; B&amp;H (Multi · Single)</span>
     <span class="chip"><b>25</b> cellules OOS walk-forward</span>
-    <span class="chip"><b>67</b> tests pytest</span>
+    <span class="chip"><b>+14,5 % ± 6,5</b> cross-actifs sur 5 seeds</span>
+    <span class="chip"><b>74</b> tests pytest</span>
     <span class="chip"><b>0,1 %</b> de frais/trade</span>
   </div>
 </header>
@@ -841,8 +848,11 @@ chaque run) est dans le <a href="../reports/rapport_drl_portfolio.pdf">rapport P
       <li>Return absolu positif 4 années sur 5 en walk-forward, drawdown borné
           à 25 % quand le B&amp;H fait -30 % : cohérent comme brique
           <em>absolute return</em> défensive.</li>
+      <li>La revendication robuste : <b>+14,5 % ± 6,5 d'alpha cross-actifs,
+          positive pour 5 seeds d'entraînement sur 5</b> (test 2021-22).</li>
       <li>Protocole verrouillé : splits chronologiques, scaler anti look-ahead,
-          éval déterministe, 67 tests, ablations contrôlées.</li>
+          éval déterministe, 74 tests, ablations contrôlées, bande de bruit
+          inter-seeds comme juge de paix.</li>
     </ul>
   </div>
   <div class="side short">
@@ -856,8 +866,14 @@ chaque run) est dans le <a href="../reports/rapport_drl_portfolio.pdf">rapport P
           (+5,1 % sans le stop pour le Multi, 0 pour le Single).</li>
       <li>Le +27,5 % du split unique était en partie un biais de période —
           2021-2022 est le régime rêvé d'un agent défensif.</li>
-      <li>Sharpe &lt; 1, cinq méga-caps survivantes, seed d'entraînement unique,
-          emprunt de titres gratuit : pas un produit, un laboratoire.</li>
+      <li>L'alpha mono-actif est une loterie de seed (AAPL : de -11 % à +44 % selon
+          l'initialisation) — seul le cross-actifs est défendable.</li>
+      <li>Les features de régime (dist. plus-haut 1 an, SMA 200) testées contre la
+          bande de bruit : <b>échec cohérent</b> — l'incitation (récompense) prime sur
+          l'information (observation). Prochain levier : position continue + récompense
+          sensible au régime.</li>
+      <li>Sharpe &lt; 1, cinq méga-caps survivantes, emprunt de titres gratuit :
+          pas un produit, un laboratoire.</li>
     </ul>
   </div>
 </div>

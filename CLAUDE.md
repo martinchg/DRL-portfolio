@@ -42,10 +42,13 @@ d'évaluation, réentraînement, nouveaux résultats…), **vérifier que les 3 
 présentation sont à jour** et les régénérer/adapter si besoin :
 
 1. **Assets + dashboard statique** : `python reports/build_assets.py`
-   → régénère `reports/figures/*.png`, `reports/metrics.json` et `docs/index.html`
-   (page GitHub Pages pour les recruteurs). Si le contenu narratif du HTML (sections
+   → régénère `reports/figures/*.png` (figures de RÉSULTATS), `reports/metrics.json` et
+   `docs/index.html` (page GitHub Pages). Si le contenu narratif du HTML (sections
    "ce qui fonctionne / ce qui reste fragile", KPI cards) n'est plus exact, éditer le
    template dans `build_assets.py`, pas le HTML généré.
+   → Figures PÉDAGOGIQUES (schémas MDP/pipeline/walk-forward, OU, clipping PPO,
+   dispersion seeds, volatility clustering, frontière efficiente) : script séparé
+   `python reports/build_concept_figures.py` (autonome, pas de modèle requis).
 2. **Rapport LaTeX** : `reports/rapport_drl_portfolio.tex` — mettre à jour les chiffres et
    sections impactés (chronologie §6, résultats §7, limites §9 ; les chiffres sont aussi
    dans `reports/metrics.json`), puis recompiler : `tectonic reports/rapport_drl_portfolio.tex`

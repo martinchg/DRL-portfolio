@@ -68,6 +68,31 @@ Je suis parti d'une question simple : \emph{un agent d'apprentissage par renforc
 peut-il apprendre à battre une stratégie passive (Buy \& Hold) sur données réelles, une
 fois les frais de transaction pris en compte ?}
 
+\paragraph{Pourquoi cette question n'est pas naïve : l'efficience des marchés.}
+Mon agent n'observe \emph{que} des transformations de prix passés (rendements,
+volatilité, momentum\ldots). Or l'hypothèse d'efficience des marchés dans sa
+\textbf{forme faible} (Fama, 1970) affirme précisément que les prix intègrent déjà
+toute l'information contenue dans leur propre historique : aucune stratégie fondée sur
+les prix passés ne devrait battre durablement le marché \emph{après coûts}. Ce projet
+est donc, littéralement, \textbf{un test empirique de l'efficience faible} sur mon
+échantillon. Et son résultat final est cohérent avec la littérature : pas de machine à
+cash, mais un edge modeste, défensif, dépendant du régime et majoritairement porté par
+une règle de risque --- le même genre de « violation limite » que les anomalies
+documentées (momentum de Jegadeesh-Titman en tête). Savoir formuler le projet ainsi
+change tout : je ne prétends pas avoir réfuté Fama, je mesure \emph{où} et \emph{de
+combien} l'hypothèse craque sur cinq actifs et treize ans.
+
+\paragraph{Pourquoi du RL, et pas de la prédiction supervisée ?} L'alternative évidente
+serait un modèle supervisé qui prédit le rendement de demain, suivi d'une règle de
+trading. Deux raisons m'ont fait préférer le RL : (1) la décision de trading est
+\emph{séquentielle et porteuse d'état} --- ma position d'aujourd'hui conditionne mes
+frais de demain (fermer puis rouvrir coûte deux fois) : optimiser la qualité de
+prédiction n'optimise pas la politique de trading, qui doit arbitrer signal contre
+coûts de changement de position ; (2) mon objectif réel --- l'alpha net de frais sous
+contrainte de drawdown --- s'écrit naturellement comme une fonction de récompense, pas
+comme une erreur quadratique de prévision. Le RL optimise directement ce que je veux
+maximiser ; le supervisé optimise un substitut.
+
 À la fin du parcours, ma réponse tient en trois temps, et c'est ce cheminement que ce
 rapport documente :
 \begin{enumerate}[itemsep=2pt]
@@ -85,6 +110,25 @@ rapport documente :
 La leçon transversale : en finance quantitative, \emph{la qualité d'une conclusion vaut
 celle du protocole qui la produit}. J'ai passé plus de temps à fiabiliser l'évaluation
 qu'à optimiser le modèle --- et c'est l'évaluation qui a tout changé.
+
+\paragraph{Ma méthode, en cinq règles.} Tout le rapport applique la même discipline ;
+autant l'énoncer une fois pour toutes :
+\begin{enumerate}[itemsep=2pt]
+  \item \textbf{Fiabiliser avant d'optimiser} : un simulateur ou un protocole faux rend
+        toute optimisation illisible --- les tests et les corrections passent avant les
+        hyperparamètres.
+  \item \textbf{Une prédiction écrite avant chaque expérience} : elle force à réfléchir
+        avant de calculer, et une prédiction fausse enseigne plus qu'une juste (les
+        miennes sont documentées, y compris les fausses).
+  \item \textbf{Un levier à la fois} : quand plusieurs choses changent ensemble, une
+        ablation contrôlée isole l'effet causal (tableaux~\ref{tab:ablationbug}
+        et~\ref{tab:ablation}).
+  \item \textbf{Aucune conclusion sans barre d'erreur} : un chiffre unique est un
+        tirage ; la bande inter-seeds (section~\ref{sec:seeds}) est le juge de paix.
+  \item \textbf{Chercher à se falsifier} : walk-forward, stress-tests, ablations ---
+        si le résultat survit à mes propres attaques, alors seulement il mérite d'être
+        présenté.
+\end{enumerate}
 
 % ============================================================
 \section{Architecture du projet}
@@ -111,7 +155,7 @@ généralisation cross-actifs. \\
 \code{walk\_forward.py} & Validation & Réentraînements glissants (fenêtre croissante
 ancrée), une année de test 100\,\% out-of-sample par fold, grille année$\times$actif. \\
 \code{dashboard.py} & Visualisation & Application Streamlit interactive. \\
-\code{tests/} & Qualité & 67 tests pytest : pipeline de données, mécanique de trading,
+\code{tests/} & Qualité & 74 tests pytest : pipeline de données, mécanique de trading,
 conformité Gymnasium, entraînements PPO courts réels, évaluation, walk-forward,
 dashboard. \\
 \code{reports/} & Présentation & Ce rapport, les figures, \code{build\_assets.py}
@@ -120,6 +164,14 @@ dashboard. \\
 \end{tabular}
 \caption{Organisation du dépôt.}
 \end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{fig_pipeline.png}
+\caption{Le flux du projet. Chaque étage est validé par des tests indépendants
+(données synthétiques, sans réseau) avant d'être branché au suivant.}
+\label{fig:pipeline}
+\end{figure}
 
 % ============================================================
 \section{Base théorique : du RL au trading}
@@ -141,6 +193,16 @@ simulation, du point de départ jusqu'à la fin des données ou au déclenchemen
 une \textbf{seed} est la graine du générateur pseudo-aléatoire --- la fixer rend chaque
 expérience exactement reproductible (indispensable pour comparer deux versions du code
 à conditions identiques).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{fig_mdp_loop.png}
+\caption{La boucle fondamentale du RL. À chaque jour de bourse, l'agent lit un état,
+choisit une action, la passe à l'environnement, qui renvoie le nouvel état et une
+récompense. Tout le reste du rapport n'est qu'un remplissage de plus en plus soigné de
+ces quatre cases.}
+\label{fig:mdp}
+\end{figure}
 
 \paragraph{Observation.} Une fenêtre glissante de 10 jours $\times$ 5 features de marché
 (section~\ref{sec:features}), plus deux variables de portefeuille : la position courante
@@ -171,6 +233,18 @@ Sur des rendements financiers --- un signal au ratio bruit/information écrasant
 cette prudence n'est pas un détail d'implémentation : sans elle, une séquence chanceuse
 suffirait à faire basculer toute la politique.
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{fig_ppo_clip.png}
+\caption{Le mécanisme central de PPO. L'objectif suit le gain espéré $\rho_t A_t$ tant
+que la nouvelle politique reste proche de l'ancienne ($\rho_t \in [1-\epsilon,
+1+\epsilon]$), puis \emph{plafonne} : au-delà, augmenter encore la probabilité de
+l'action n'apporte plus rien au gradient. On ne peut donc jamais « tout miser » sur un
+lot d'expérience chanceux --- exactement la garde-fou qu'exigent des données aussi
+bruitées que des rendements.}
+\label{fig:ppoclip}
+\end{figure}
+
 Trois rouages qu'il faut savoir expliquer :
 \begin{itemize}[itemsep=2pt]
   \item \textbf{fonction de valeur} : un second réseau estime $V(s_t)$, « ce que cet
@@ -188,6 +262,30 @@ Trois rouages qu'il faut savoir expliquer :
         aussi position et PnL, et ses statistiques doivent être \emph{sauvegardées avec
         le modèle} --- un modèle nourri d'observations brutes à l'évaluation produit du
         non-sens, comme je l'ai appris à mes dépens (section~\ref{sec:iter2}).
+\end{itemize}
+
+\subsection{Trois choix de conception --- et les alternatives écartées}
+
+\begin{itemize}[itemsep=3pt]
+  \item \textbf{PPO plutôt que DQN ou SAC.} Trois familles existaient : les méthodes
+        \emph{value-based} (DQN : apprendre $Q(s,a)$ puis agir gloutonnement ---
+        réputées instables sur des récompenses bruitées et non stationnaires, et
+        sujettes à la surestimation des valeurs) ; les \emph{policy gradients
+        on-policy} (A2C, PPO : optimiser directement la politique sur l'expérience
+        fraîche) ; les méthodes \emph{off-policy continues} (SAC, TD3 : efficaces en
+        données mais pour actions continues et plus délicates à régler). PPO gagne pour
+        moi par sa \textbf{stabilité} (le clipping borne chaque mise à jour --- crucial
+        quand le signal est du bruit à 95\,\%), son support natif des actions
+        discrètes, et son statut de standard reproductible dans Stable-Baselines3.
+  \item \textbf{Actions discrètes (4) plutôt que continues.} Le tout-ou-rien simplifie
+        l'apprentissage et rend chaque action \emph{économiquement lisible} (long,
+        cash, short) --- au prix d'une gestion du risque binaire, limite documentée en
+        section~\ref{sec:limites} ; le passage à une position continue $[-1, 1]$ est le
+        levier suivant.
+  \item \textbf{Données journalières.} Compromis entre le bruit (l'intraday exigerait
+        de modéliser la microstructure que mon simulateur ignore) et la quantité
+        d'expérience (le mensuel n'offrirait que $\sim$150 décisions par actif). Au
+        pas journalier, 13 ans $\times$ 5 actifs $\approx$ 16\,000 jours de décision.
 \end{itemize}
 
 \subsection{Single-agent, multi-actifs, multi-agents : ne pas confondre}
@@ -300,6 +398,28 @@ signale les écarts extrêmes susceptibles de se résorber). Mais le cadre OU es
 que j'utiliserais pour trader un \emph{spread} de paires cointégrées --- le projet
 suivant sur ma liste --- et c'est le vocabulaire attendu en entretien dès qu'on dit
 « mean reversion ».
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{fig_ou_process.png}
+\caption{Trois processus d'Ornstein-Uhlenbeck partant du même écart initial. Plus la
+vitesse de rappel $\kappa$ est grande, plus vite la trajectoire revient vers $\mu$ ---
+la \emph{demi-vie} $\ln 2/\kappa$ quantifie ce « temps de retour ». C'est l'objet qu'un
+stratège stat-arb estime sur le spread d'une paire avant de décider s'il vaut la peine
+d'être tradé.}
+\label{fig:ou}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{fig_vol_clustering.png}
+\caption{Ce que la feature \code{volatility} donne à voir à l'agent. En haut, un
+GARCH(1,1) : les grandes variations s'agglutinent (une journée agitée en annonce une
+autre) --- le \emph{volatility clustering}, fait stylisé omniprésent des marchés. En
+bas, un bruit gaussien de même variance : aucune structure. La rolling-std de 20 jours
+est un estimateur naïf de l'état de volatilité du haut.}
+\label{fig:vol}
+\end{figure}
 \label{sec:reward}
 % ============================================================
 
@@ -553,6 +673,12 @@ Multi $+8{,}1\,\%\pm3{,}1$).}
 \label{tab:final}
 \end{table}
 
+\paragraph{Mise à jour (Acte 3, section~\ref{sec:seeds}).} L'alpha \emph{mono-actif} de
+ce tableau porte une incertitude de $\pm 21$ points selon le seed d'entraînement --- le
+$+27{,}5\,\%$ vient du haut de la distribution. La statistique robuste est la moyenne
+cross-actifs : \textbf{$+14{,}5\,\% \pm 6{,}5$, positive pour 5 seeds sur 5} sur cette
+fenêtre de test.
+
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{fig_equity_test.png}
@@ -633,6 +759,17 @@ complets et $5 \times 5 = 25$ cellules année$\times$actif. Deux limites assumé
 400\,000 pas d'entraînement par fold (contre 800\,000 pour le modèle de référence,
 pour un temps de calcul raisonnable), et des folds anciens qui voient moins d'histoire.
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{fig_walkforward_schema.png}
+\caption{Le protocole en image. Chaque ligne est un fold : le modèle n'apprend que sur
+le passé (vert, ancré à 2010) et n'est jugé que sur l'année suivante (orange), jamais
+vue. En avançant fold après fold, on obtient une \emph{séquence} de tests
+out-of-sample au lieu d'un seul --- la généralisation dynamique du principe de
+l'échantillon de test en économétrie.}
+\label{fig:wfschema}
+\end{figure}
+
 \subsection{Ce que j'avais prédit --- et ce qui s'est passé}
 
 Avant de lancer, j'ai noté ma prédiction : \emph{l'alpha moyen serait nettement plus
@@ -704,8 +841,11 @@ régimes} --- il applique la même prudence dans un krach durable et dans un reb
 Trois pistes, par ordre de priorité que je me fixe :
 \begin{enumerate}[itemsep=2pt]
   \item \textbf{features de régime} (tendance longue, distance au plus-haut d'un an,
-        vitesse de reprise --- l'esprit des modèles à changement de régime de type
-        Markov-switching, vus en économétrie) ;
+        vitesse de reprise) --- l'esprit des modèles à changement de régime de type
+        \emph{Markov-switching} (Hamilton, 1989), vus en économétrie : les paramètres
+        du processus sautent entre quelques états latents (bull, bear) pilotés par une
+        chaîne de Markov cachée, et on infère l'état courant à partir des données.
+        \emph{Piste testée depuis, et falsifiée --- voir la section~\ref{sec:regime}} ;
   \item \textbf{position continue} (action $\in [-1, 1]$) au lieu du tout-ou-rien, pour
         que la défense soit graduelle et non binaire ;
   \item \textbf{adversarial training multi-agents} (section~\ref{sec:marl}) et
@@ -787,18 +927,169 @@ du « market timing par RL » serait faux : c'est \emph{une discipline de risque
 systématique, aidée par un signal RL modeste}. Cette phrase résume honnêtement le
 projet.
 
-\subsection{Les questions auxquelles je n'ai pas encore de mesure}
+\subsection{Les questions restantes --- et celle qui a depuis reçu sa mesure}
 
 \begin{itemize}[itemsep=2pt]
-  \item \emph{Sensibilité au seed d'entraînement} : tous mes modèles partagent le seed
-        42 ; il faudrait ré-entraîner sur plusieurs seeds pour donner un intervalle sur
-        l'alpha (coût : quelques heures de calcul).
+  \item \emph{Sensibilité au seed d'entraînement} : mesurée depuis à
+        l'Acte~3 (section~\ref{sec:seeds}) --- $\pm 21$ points sur un actif isolé,
+        $\pm 6{,}5$ sur la moyenne cross-actifs, positive pour 5 seeds sur 5.
   \item \emph{Coût d'emprunt des shorts} : non modélisé explicitement (le stress de
         frais le capture partiellement) ; sur des titres chers à emprunter, l'alpha
         short de 2022 serait rogné.
   \item \emph{Exécution au cours de clôture} : pas d'écart d'exécution intrajournalier
         ni d'impact de marché.
 \end{itemize}
+
+
+% ============================================================
+\section{Acte 3 : attaquer la dépendance de régime}
+\label{sec:acte3}
+% ============================================================
+
+Le diagnostic est posé (sections~\ref{sec:wf} et~\ref{sec:stress}) : profil défensif
+régime-dépendant, alpha majoritairement porté par la règle de stop. La suite logique
+saute aux yeux --- « rendre l'agent conscient des régimes ». Mais avant de tester le
+moindre traitement, il me manque une chose : \textbf{une barre d'erreur}. Le RL profond
+est notoirement sensible au hasard d'initialisation (poids du réseau, ordre
+d'exploration) ; tant que je ne connais pas la dispersion de mes résultats d'un seed à
+l'autre, je ne peux pas distinguer une amélioration réelle d'un tirage chanceux. D'où le
+plan de cet acte : (1) mesurer le bruit, (2) tester le traitement, (3) conclure
+\emph{hors bruit}.
+
+\subsection{D'abord la barre d'erreur : cinq seeds}
+\label{sec:seeds}
+
+\paragraph{Protocole.} Quatre réentraînements complets du Multi, strictement identiques
+au modèle de référence (données 2010--2023, 800\,000 pas, validation propre), en ne
+changeant que le seed --- 7, 123, 777, 2024, plus le 42 existant. Un détail qui aurait
+tout invalidé : le seed était \emph{codé en dur} dans l'appel à PPO ; sans le
+paramétrer d'abord, mes « cinq entraînements » auraient été cinq copies du même tirage.
+
+\paragraph{Ce que j'avais prédit.} Une dispersion non triviale mais un signe stable ---
+alpha AAPL positif pour au moins 4 seeds sur 5.
+
+\paragraph{Résultat : prédiction fausse, leçon meilleure.}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrrc@{}}
+\toprule
+\textbf{Seed} & \textbf{Alpha AAPL} & \textbf{Alpha cross-actifs (moy.)} & \textbf{Actifs $>0$} \\
+\midrule
+7    & $+43{,}6\,\%$ & $+16{,}5\,\%$ & 4/5 \\
+42 (référence) & $+27{,}5\,\%$ & $+17{,}2\,\%$ & 5/5 \\
+123  & $-5{,}1\,\%$  & $+10{,}6\,\%$ & 3/5 \\
+777  & $-2{,}3\,\%$  & $+23{,}7\,\%$ & 3/5 \\
+2024 & $-11{,}2\,\%$ & $+4{,}3\,\%$  & 3/5 \\
+\midrule
+Moyenne $\pm$ écart-type & $+10{,}5\,\% \pm 21{,}3$ & \ok{$+14{,}5\,\% \pm 6{,}5$} & --- \\
+\bottomrule
+\end{tabular}
+\caption{Robustesse au seed d'entraînement (test 2021--2022, protocole identique au
+tableau~\ref{tab:final}). L'alpha cross-actifs est positif pour \ok{5 seeds sur 5}.}
+\label{tab:seeds}
+\end{table}
+
+L'alpha \emph{sur AAPL seul} est une loterie : de $-11$ à $+44\,\%$ selon le seed,
+positif 2 fois sur 5 --- mon $+27{,}5\,\%$ de référence vient du haut de cette
+distribution. Mais la moyenne \emph{sur les cinq actifs} est remarquablement plus
+stable et \ok{positive pour tous les seeds}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{fig_seed_dispersion.png}
+\caption{La leçon de l'acte, en une image. Chaque colonne est un seed d'entraînement.
+Les points rouges (alpha d'un seul actif) sont dispersés sur $\pm 21$ points ; les
+carrés verts (moyenne sur cinq actifs) tiennent dans une bande de $\pm 6{,}5$. Le bruit
+d'initialisation, largement idiosyncratique par actif, se \emph{diversifie} en
+moyennant --- la même mécanique que le risque spécifique dans un portefeuille.}
+\label{fig:seeds}
+\end{figure}
+
+\paragraph{Pourquoi cet écart ? La théorie du portefeuille, encore.} Le bruit de seed
+frappe chaque couple (seed, actif) de manière largement idiosyncratique ; en moyennant
+sur cinq actifs, il se diversifie --- exactement comme le risque spécifique d'un titre
+dans un portefeuille de Markowitz. Deux conséquences que j'applique immédiatement :
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{le chiffre défendable n'est pas l'alpha d'un actif, c'est la moyenne
+        cross-actifs} : $+14{,}5\,\% \pm 6{,}5$ sur cette fenêtre de test --- les
+        sections vivantes du rapport sont mises à jour en conséquence ;
+  \item \textbf{toute expérience future se juge contre la bande $\pm 6{,}5$ points} :
+        en dessous, c'est du bruit, quel que soit l'enthousiasme.
+\end{itemize}
+
+\subsection{Le traitement : des features de régime --- et son échec instructif}
+\label{sec:regime}
+
+\paragraph{Hypothèse et protocole.} Le diagnostic du walk-forward disait : l'agent ne
+distingue pas un krach durable d'un rebond en V. Le traitement le plus direct consiste
+à \emph{lui montrer le régime}. J'ai ajouté deux features long-terme à l'observation
+($52 \to 72$ entrées) : \code{dist\_high\_252}, la position par rapport au plus-haut
+d'un an (le drawdown de l'actif lui-même --- proche de zéro en bull, $-30\,\%$ en
+krach), et \code{trend\_200}, la position par rapport à la moyenne mobile 200 jours
+(LE proxy de régime des praticiens). Tout le reste est identique --- données
+2010--2023, configuration, seed 42 --- et le candidat s'entraîne dans un dossier
+séparé : promotion uniquement s'il bat la bande de bruit de la
+section~\ref{sec:seeds}.
+
+\paragraph{Ce que j'avais prédit.} Amélioration du fold 2020 (le pire : $-146\,\%$)
+sans dégradation de 2022.
+
+\paragraph{Résultat : faux sur les deux volets.}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Alpha moyen (5 actifs)} & \textbf{Baseline (obs 52)} & \textbf{+ régime (obs 72)} \\
+\midrule
+2018 (bear)            & $+9{,}2\,\%$   & $+30{,}3\,\%$\footnotemark \\
+2019 (bull)            & $-21{,}0\,\%$  & $-5{,}7\,\%$ \\
+2020 (krach + rebond)  & $-146{,}4\,\%$ & \ko{$-162{,}5\,\%$} \\
+2021 (bull)            & $-11{,}1\,\%$  & \ko{$-51{,}7\,\%$} \\
+2022 (bear)            & $+37{,}6\,\%$  & \ko{$+17{,}2\,\%$} \\
+\midrule
+Walk-forward : médiane / cellules $>0$ & $-2{,}0\,\%$ / 48\,\% & $-2{,}9\,\%$ / 36\,\% \\
+Test 2021-22 : cross-actifs / positifs & $+17{,}2\,\%$ / 5 sur 5 & $+11{,}6\,\%$ / 2 sur 5 \\
+\bottomrule
+\end{tabular}
+\caption{Baseline contre candidat « régime », même seed, même protocole.}
+\label{tab:regime}
+\end{table}
+\footnotetext{Tiré par une seule cellule (TSLA 2018 : $+145{,}6\,\%$) --- davantage un
+ticket de loterie qu'un signe de clairvoyance, cf.\ la dispersion mesurée en
+section~\ref{sec:seeds}.}
+
+\paragraph{Verdict : pas de promotion.} Sur la fenêtre de test, le candidat tombe dans
+la bande de bruit, du mauvais côté ($+11{,}6\,\%$, 2 actifs positifs sur 5). Sur le
+walk-forward, la dégradation est cohérente précisément là où le traitement devait
+agir : 2020 \emph{empire}, 2021 s'effondre, et même 2022 --- la force du profil ---
+recule. Une seule seed, certes ; mais quand toutes les années clés bougent dans le même
+sens, l'explication « bruit » ne tient plus.
+
+\paragraph{Pourquoi cet échec est un bon résultat.} Mon hypothèse d'« underfitting de
+représentation » est falsifiée dans sa version naïve : \textbf{voir le régime ne suffit
+pas à l'exploiter}. La récompense de l'agent (alpha par pas, pénalité de drawdown,
+kill-switch) ne valorise pas différemment la prudence selon le régime --- ajouter des
+colonnes à l'observation ne change pas les \emph{incitations}, et l'espace d'entrée
+élargi offre surtout plus de latitude pour sur-apprendre. La contrainte active n'était
+pas l'information mais la structure de la récompense et l'action tout-ou-rien. En
+économiste, je devrais reconnaître le schéma : les agents répondent aux incitations,
+pas aux informations qu'on leur affiche.
+
+\subsection{Bilan de l'acte}
+
+Trois acquis, dont deux méthodologiques :
+\begin{enumerate}[itemsep=2pt]
+  \item \textbf{la revendication robuste du projet} : alpha cross-actifs
+        $+14{,}5\,\% \pm 6{,}5$ sur le test 2021-22, positif pour 5 seeds sur 5
+        (l'alpha mono-actif, lui, est une loterie à $\pm 21$ points) ;
+  \item \textbf{une barre d'erreur permanente} : toute expérience future se juge
+        contre la bande inter-seeds, pas contre un chiffre unique ;
+  \item \textbf{une direction falsifiée et une nouvelle priorité} : le prochain levier
+        n'est pas l'observation mais la récompense et le dimensionnement de position
+        (action continue, aversion au risque dépendante du régime).
+\end{enumerate}
 
 
 % ============================================================
@@ -845,9 +1136,10 @@ tout appeler « overfitting ». Maintenant je sépare trois choses :
 % ============================================================
 
 \begin{itemize}[itemsep=3pt]
-  \item \textbf{Profil régime-dépendant} (section~\ref{sec:wf}) : la limite principale
-        désormais, avec ses trois pistes de réponse (features de régime, position
-        continue, adversarial training).
+  \item \textbf{Profil régime-dépendant} (section~\ref{sec:wf}) : la limite principale.
+        La piste « features de régime » a été testée et falsifiée
+        (section~\ref{sec:regime}) ; les pistes restantes, par ordre : position
+        continue avec récompense sensible au régime, puis adversarial training.
   \item \textbf{L'alpha est majoritairement porté par la règle de stop}
         (section~\ref{sec:stress}) : sans kill-switch, il reste $+5\,\%$ (Multi) à
         $-2\,\%$ (Single). L'agent n'a pas appris une gestion du risque continue ---
@@ -924,6 +1216,12 @@ d'avant-entretien.
         coûté cher : la qualité de cette sélection vaut celle du signal de validation
         (tableau~\ref{tab:ablationbug} : $+30$ points d'alpha entre une validation
         corrompue et une propre, tout le reste identique).
+  \item[Efficience des marchés (EMH)] Hypothèse de Fama (1970) en trois formes selon
+        l'information réputée déjà « dans les prix » : \emph{faible} (les prix
+        passés), \emph{semi-forte} (toute information publique), \emph{forte} (toute
+        information, y compris privée). Mon agent ne consommant que des prix passés,
+        ce projet teste la forme faible --- et conclut à un edge modeste, défensif et
+        régime-dépendant : une violation limite, pas une réfutation.
   \item[Entropie (bonus d')] $\mathcal{H}[\pi] = -\sum_a \pi(a)\log\pi(a)$, maximale
         quand la politique hésite uniformément. Un petit bonus ($c_2 = 0{,}05$)
         récompense cette hésitation résiduelle → l'agent continue d'explorer au lieu
@@ -966,9 +1264,10 @@ d'avant-entretien.
   \item[Overfitting / underfitting] Apprendre par c\oe ur le train (excellent
         in-sample, mauvais out-of-sample) / ne pas capter le signal disponible
         (mauvais partout). Mon train à $+16\,500\,\%$ d'alpha crie l'overfitting de
-        mémorisation ; mais mon vrai plafond est un \emph{underfitting de
-        représentation} : aucune capacité de réseau ne compense des features qui ne
-        contiennent pas l'information de régime.
+        mémorisation ; mon plafond réel tient au régime --- et l'Acte 3 a affiné le
+        diagnostic : donner l'information de régime ne suffit pas
+        (section~\ref{sec:regime}), c'est la \emph{récompense} qui doit inciter à
+        s'en servir.
   \item[Point de base (bp)] $0{,}01\,\%$. L'unité standard des coûts d'exécution et
         des écarts de taux : dire « 10\,bp par trade » est plus précis et plus
         professionnel que « 0,1\,\% ».
@@ -980,9 +1279,9 @@ d'avant-entretien.
         (perte complète en annexe~\ref{app:ppo}).
   \item[Seed] Graine du générateur pseudo-aléatoire. La fixer rend l'expérience
         exactement reproductible (comparer deux versions du code à hasard identique) ;
-        la faire \emph{varier} mesure la sensibilité au hasard --- ce que je n'ai pas
-        encore fait pour l'entraînement, et que je liste honnêtement dans les
-        questions ouvertes.
+        la faire \emph{varier} mesure la sensibilité au hasard --- mesurée à
+        l'Acte~3 : $\pm 21$ points d'alpha sur un actif isolé, $\pm 6{,}5$ sur la
+        moyenne cross-actifs. Toute amélioration se juge contre cette bande.
   \item[Sharpe / Sortino / Calmar] Trois façons de rapporter le rendement au risque :
         à la volatilité totale ($\bar r / \hat\sigma \times \sqrt{252}$ --- les 252
         jours de bourse annualisent), à la volatilité \emph{baissière} seule (Sortino
@@ -1009,7 +1308,7 @@ d'avant-entretien.
   \item Entraînement complet : \code{python train.py} ($\sim$10--15 min CPU) ;
   \item Rapport d'évaluation : \code{python evaluate.py} ;
   \item Walk-forward : \code{python walk\_forward.py} ($\sim$25 min, 5 folds) ;
-  \item Suite de tests : \code{python -m pytest} (67 tests ; marqueurs \code{network}
+  \item Suite de tests : \code{python -m pytest} (74 tests ; marqueurs \code{network}
         et \code{slow} pour l'intégration) ;
   \item Figures de ce rapport + dashboard statique : \code{python reports/build\_assets.py} ;
   \item Dashboard interactif : \code{streamlit run dashboard.py}.
@@ -1095,8 +1394,12 @@ Trois lectures :
   \item le \textbf{min} rend l'objectif \emph{pessimiste} : si le ratio $\rho_t$ sort
         de $[1-\varepsilon, 1+\varepsilon]$ dans le sens qui augmenterait l'objectif, le
         gradient est coupé --- on ne « surexploite » jamais un lot d'expérience ;
-  \item le terme de \textbf{valeur} entraîne le critique ($V_t^{\text{cible}}$ est le
-        rendement observé bootstrappé) ; sans bon critique, pas de bon avantage ;
+  \item le terme de \textbf{valeur} entraîne le critique --- $V_t^{\text{cible}}$ est
+        le rendement observé « bootstrappé » \emph{au sens RL} : au-delà de l'horizon
+        collecté, on complète par l'estimation $V(s_{t+n})$ elle-même (rien à voir
+        avec le bootstrap par rééchantillonnage de l'économétrie : ici on s'appuie sur
+        sa propre estimation, là-bas on rééchantillonne ses données) ; sans bon
+        critique, pas de bon avantage ;
   \item l'\textbf{entropie} $\mathcal{H}[\pi] = -\sum_a \pi(a) \log \pi(a)$ est maximale
         pour une politique uniforme : la pénaliser négativement ($-c_2\mathcal{H}$
         dans la perte) revient à \emph{récompenser} l'indécision résiduelle, donc
@@ -1135,5 +1438,109 @@ Usage type en trading : modéliser le \emph{spread} de deux actifs cointégrés,
 $\kappa$ et $t_{1/2}$, n'entrer que si la demi-vie est courte devant l'horizon de
 détention et les frais --- le c\oe ur du projet stat-arb décrit dans
 \code{PROJETS\_FUTURS.md}.
+
+% ============================================================
+\section{Compléments théoriques : les ponts avec mes cours}
+\label{app:theorie}
+% ============================================================
+
+Cette annexe développe les quatre corps de théorie que le rapport mobilise sans les
+dérouler. Elle est écrite pour relier explicitement le projet à ce que j'ai vu en
+licence d'économie (gestion de portefeuille, économétrie) et en calcul stochastique.
+
+\subsection{CAPM et alpha de Jensen : d'où vient ma récompense}
+\label{app:capm}
+
+Le \emph{Capital Asset Pricing Model} (Sharpe, Lintner, 1964) postule qu'à l'équilibre,
+le rendement espéré d'un actif ne dépend que de son exposition au risque de marché :
+\[
+\mathbb{E}[R_i] = R_f + \beta_i\,\big(\mathbb{E}[R_m] - R_f\big),
+\qquad \beta_i = \frac{\operatorname{Cov}(R_i, R_m)}{\operatorname{Var}(R_m)} .
+\]
+Cette droite --- la \emph{Security Market Line} --- dit ce qu'un actif « devrait »
+rapporter vu son $\beta$. L'\textbf{alpha de Jensen} est l'écart empirique à cette
+prédiction :
+\[
+\alpha_i = \mathbb{E}[R_i] - \big[R_f + \beta_i(\mathbb{E}[R_m] - R_f)\big] .
+\]
+Un $\alpha > 0$ est une performance \emph{inexpliquée} par l'exposition au marché ---
+le Graal du gérant actif. Ma récompense par pas
+(section~\ref{sec:reward}) est cet $\alpha$ sous les hypothèses simplificatrices
+$\beta = 1$ et $R_f = 0$ : je récompense l'agent pour ce que le marché seul
+n'explique pas. En pratique, mesurer un « vrai » alpha exigerait d'estimer $\beta$ par
+la régression $R_{i,t} - R_f = \alpha_i + \beta_i (R_{m,t} - R_f) + \varepsilon_t$ ---
+une régression MCO où l'intercept \emph{est} l'alpha : le pont le plus direct entre mon
+cours d'économétrie et ma métrique.
+
+\subsection{Markowitz, frontière efficiente et ratio de Sharpe}
+\label{app:markowitz}
+
+La théorie moderne du portefeuille (Markowitz, 1952) pose le problème de l'allocation
+comme un arbitrage moyenne-variance : pour un vecteur de poids $w$, rendement espéré
+$w^\top \mu$ et risque $w^\top \Sigma\, w$. L'ensemble des portefeuilles qui maximisent
+le rendement à risque donné forme la \textbf{frontière efficiente}
+(figure~\ref{fig:frontier}).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{fig_efficient_frontier.png}
+\caption{Nuage de portefeuilles simulés sur quatre actifs. Le bord supérieur-gauche est
+la frontière efficiente ; l'étoile est le portefeuille de \emph{Sharpe maximal}, point
+de tangence de la \emph{Capital Market Line} issue de $r_f$. Le ratio de Sharpe est
+géométriquement la \emph{pente} de la droite reliant $r_f$ à un portefeuille : le
+maximiser, c'est trouver la droite la plus raide qui touche encore le nuage.}
+\label{fig:frontier}
+\end{figure}
+
+Deux idées de ce cadre irriguent le projet. D'abord, le \textbf{ratio de Sharpe} que
+j'utilise comme métrique n'est pas un choix arbitraire : c'est la pente de la CML,
+l'unité naturelle du « rendement par unité de risque » dans ce modèle. Ensuite, la
+\textbf{diversification} : parce que les actifs sont imparfaitement corrélés
+($\Sigma$ n'est pas diagonale), un portefeuille a moins de risque que la moyenne de ses
+composantes --- la seule « free lunch » de la finance. C'est exactement le mécanisme
+que je retrouve, de façon inattendue, dans la robustesse au seed
+(section~\ref{sec:seeds}) : moyenner l'alpha sur cinq actifs diversifie le bruit
+d'entraînement idiosyncratique, comme un portefeuille diversifie le risque spécifique.
+Mon environnement, lui, reste mono-actif (pas d'allocation) --- d'où un Sharpe
+structurellement plafonné, et le projet « allocation sous contrainte CVaR » de ma liste.
+
+\subsection{GARCH : modéliser le regroupement de volatilité}
+\label{app:garch}
+
+Les rendements financiers ne sont pas homoscédastiques : leur variance change dans le
+temps et se regroupe (figure~\ref{fig:vol}). Le modèle GARCH(1,1) (Bollerslev, 1986,
+généralisant l'ARCH d'Engle, 1982) capture ce fait par une variance conditionnelle
+autorégressive :
+\[
+\sigma_t^2 = \omega + \alpha\,\varepsilon_{t-1}^2 + \beta\,\sigma_{t-1}^2,
+\qquad \varepsilon_t = \sigma_t z_t,\quad z_t \sim \mathcal{N}(0,1) .
+\]
+La variance de demain est un mélange d'un socle $\omega$, du choc d'hier
+$\varepsilon_{t-1}^2$ (terme ARCH) et de la variance d'hier $\sigma_{t-1}^2$ (terme
+GARCH). La condition de stationnarité $\alpha + \beta < 1$ garantit un retour vers la
+variance de long terme $\omega/(1 - \alpha - \beta)$ ; en pratique sur actions,
+$\alpha + \beta$ est proche de 1 (volatilité très persistante). Je n'estime pas de
+GARCH dans ce projet --- ma feature \code{volatility} en est un proxy non paramétrique
+(l'écart-type glissant) --- mais c'est le modèle de référence auquel je comparerais une
+prévision de volatilité (projet « GARCH vs ML » de ma liste), et le vocabulaire attendu
+dès qu'on parle de risque conditionnel.
+
+\subsection{Équation de Bellman : le socle de la fonction de valeur}
+\label{app:bellman}
+
+Pourquoi la fonction de valeur $V(s)$ (le critique de PPO) est-elle apprenable ? Parce
+qu'elle satisfait une relation de cohérence récursive, l'\textbf{équation de Bellman} :
+\[
+V^\pi(s) = \mathbb{E}_{a \sim \pi,\, s'}\big[\, r(s, a) + \gamma\, V^\pi(s')\,\big] .
+\]
+« La valeur d'aujourd'hui = récompense immédiate + valeur actualisée de demain. » C'est
+le principe d'optimalité de la programmation dynamique (Bellman, 1957) --- le même qui
+sous-tend la résolution récursive d'un arbre de décision ou le pricing d'une option
+américaine par backward induction. Le critique apprend $V$ en réduisant l'écart entre
+ses deux membres (l'erreur de différence temporelle
+$\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$, brique de GAE en annexe~\ref{app:gae}).
+Le pont avec la finance quantitative est direct : évaluer une option américaine, c'est
+résoudre une équation de Bellman où « exercer » est une action et la valeur de
+continuation joue le rôle de $\gamma V(s')$.
 
 \end{document}

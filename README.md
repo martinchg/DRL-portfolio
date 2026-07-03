@@ -40,14 +40,16 @@ Deterministic full-split evaluation, observations normalized with the training `
 
 **Walk-forward validation (the honest picture)** — 5 rolling retrainings tested on out-of-sample years 2018→2022 × 5 assets reveal a **regime-dependent defensive profile**: strongly positive alpha in down years (2018: +9.2%, 2022: +37.6%) and positive *absolute* returns in 4/5 years, but the agent lags Buy & Hold in strong bull years (2020: stopped in the COVID crash, it misses the violent rebound). Median cell alpha: -2.0%, 48% of cells positive. The single-split result above must be read through this lens: 2021-2022 is exactly the regime where a defensive agent shines.
 
-Known limitations: regime-dependent performance (see walk-forward above), Max Drawdown bounded by the kill-switch (~25%) rather than learned risk management, absolute Sharpe below 1. Reproduce with `python train.py`, `python evaluate.py`, `python walk_forward.py`; run the test suite with `python -m pytest`.
+**Seed robustness & a falsified fix (Act 3)** — retraining across 5 seeds shows the single-asset alpha is a lottery (AAPL: -11% to +44%, positive 2/5) while the **cross-asset mean holds: +14.5% ± 6.5, positive for 5/5 seeds** — that is the defensible claim. Adding regime features to the observation (dist-to-1y-high, 200-day trend; obs 52→72) was then tested against this noise band and **failed consistently** (walk-forward: 2021 and 2022 both degraded): seeing the regime is not enough — the *reward* must incentivize using it. Next lever: continuous position sizing with a regime-aware risk penalty.
+
+Known limitations: regime-dependent performance (see walk-forward above), alpha mostly carried by the stop rule, Max Drawdown bounded by the kill-switch (~25%), absolute Sharpe below 1. Reproduce with `python train.py`, `python evaluate.py`, `python walk_forward.py`, `python seed_robustness.py`, `python regime_experiment.py`; run the test suite with `python -m pytest`.
 
 ## Documentation & Dashboards
 
 * 📄 **[Rapport pédagogique (PDF)](reports/rapport_drl_portfolio.pdf)** — full methodology in French: MDP formulation, features ↔ econometrics (stationarity, GARCH, look-ahead bias), reward ↔ Jensen's alpha, risk metrics ↔ portfolio theory, the complete timeline of bugs found and fixed, and an honest overfitting analysis. Source: [rapport_drl_portfolio.tex](reports/rapport_drl_portfolio.tex) (compile with `tectonic` or Overleaf).
 * 📊 **[Static results dashboard](docs/index.html)** — interactive Plotly charts + honest "what works / what doesn't" reading, no installation needed. To publish it: GitHub → Settings → Pages → deploy from branch `main`, folder `/docs`.
 * 🖥️ **Interactive dashboard** — `streamlit run dashboard.py` (data/feature exploration, model evaluation with proper observation normalization).
-* 🔁 Regenerate all figures, metrics and the static dashboard: `python reports/build_assets.py`.
+* 🔁 Regenerate result figures + metrics + static dashboard: `python reports/build_assets.py` ; regenerate the conceptual/pedagogical figures (MDP loop, PPO clipping, Ornstein-Uhlenbeck, efficient frontier…): `python reports/build_concept_figures.py`.
 
 ## Motivation
 This project bridges the gap between **Quantitative Finance** (Stochastic Calculus, Portfolio Theory) and **Modern AI** (Deep Learning). It was developed to explore how model-free agents can adapt to non-stationary market environments where traditional parametric models often fail.

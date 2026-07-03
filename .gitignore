@@ -13,3 +13,7 @@ __pycache__/
 *.csv
 *.claude/
 
+# Runs TensorBoard — bruit régénérable, jamais versionné
+**/events.out.tfevents.*
+**/PPO_*/
+
