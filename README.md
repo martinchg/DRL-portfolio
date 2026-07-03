@@ -47,7 +47,7 @@ Known limitations: regime-dependent performance (see walk-forward above), alpha 
 ## Documentation & Dashboards
 
 * 📄 **[Rapport pédagogique (PDF)](reports/rapport_drl_portfolio.pdf)** — full methodology in French: MDP formulation, features ↔ econometrics (stationarity, GARCH, look-ahead bias), reward ↔ Jensen's alpha, risk metrics ↔ portfolio theory, the complete timeline of bugs found and fixed, and an honest overfitting analysis. Source: [rapport_drl_portfolio.tex](reports/rapport_drl_portfolio.tex) (compile with `tectonic` or Overleaf).
-* 📊 **[Static results dashboard](docs/index.html)** — interactive Plotly charts + honest "what works / what doesn't" reading, no installation needed. To publish it: GitHub → Settings → Pages → deploy from branch `main`, folder `/docs`.
+* 📊 **[Live results dashboard](https://martinchg.github.io/DRL-portfolio/)** — interactive Plotly charts, the 7-step research timeline, and an honest "what works / what doesn't" reading. No installation needed (source: [docs/index.html](docs/index.html), served by GitHub Pages).
 * 🖥️ **Interactive dashboard** — `streamlit run dashboard.py` (data/feature exploration, model evaluation with proper observation normalization).
 * 🔁 Regenerate result figures + metrics + static dashboard: `python reports/build_assets.py` ; regenerate the conceptual/pedagogical figures (MDP loop, PPO clipping, Ornstein-Uhlenbeck, efficient frontier…): `python reports/build_concept_figures.py`.
 
