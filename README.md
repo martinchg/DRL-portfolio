@@ -1,6 +1,7 @@
 # DRL portfolio
 
-![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
+![tests](https://github.com/martinchg/DRL-portfolio/actions/workflows/tests.yml/badge.svg)
+![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![Status](https://img.shields.io/badge/Status-In%20Progress-orange)
 
 ## Overview
