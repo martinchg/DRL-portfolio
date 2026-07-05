@@ -1,0 +1,26 @@
+{
+  "T": 1000,
+  "schedule": "cosine",
+  "channels": [
+    32,
+    64,
+    128
+  ],
+  "t_dim": 128,
+  "lr": 0.0002,
+  "batch": 128,
+  "steps": 25000,
+  "ema_decay": 0.999,
+  "seed": 42,
+  "out_dir": "models/diffusion_v1",
+  "log_every": 500,
+  "window": 256,
+  "stride": 1,
+  "n_windows": 10015,
+  "n_params": 559713,
+  "mu": 0.0008192981476895511,
+  "sigma": 0.018462393432855606,
+  "final_loss": 0.19241839680075645,
+  "duree_min": 75.1,
+  "device": "mps"
+}

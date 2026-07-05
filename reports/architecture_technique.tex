@@ -1,0 +1,375 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage[french]{babel}
+\usepackage{fontspec}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, urlcolor=blue!60!black}
+\definecolor{codebg}{RGB}{245,245,242}
+\lstset{basicstyle=\ttfamily\small, backgroundcolor=\color{codebg},
+        frame=single, framerule=0pt, xleftmargin=8pt, xrightmargin=8pt,
+        breaklines=true, extendedchars=false, columns=fullflexible,
+        keepspaces=true}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\piege}[1]{\paragraph{\textcolor{red!70!black}{Piège vécu.}} #1}
+\setlength{\parskip}{4pt}
+\setlength{\parindent}{0pt}
+
+\title{\textbf{DRL Portfolio --- architecture technique}\\
+\large Comment c'est construit : pipeline, environnement, entraînement,
+générateur de scénarios, tests\\
+\normalsize (complément d'implémentation au rapport --- qui, lui, porte le
+raisonnement financier)}
+\author{Martin Chassaing}
+\date{État du code au 5 juillet 2026 --- document instantané, non maintenu en continu}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\section{Vue d'ensemble : deux sous-systèmes, un juge commun}
+% ============================================================
+
+Le dépôt contient deux sous-systèmes indépendants qui partagent la même
+discipline d'évaluation :
+
+\begin{enumerate}[itemsep=2pt]
+  \item \textbf{L'agent de trading} : \code{data\_loader.py} $\to$
+        \code{environment.py} $\to$ \code{train.py} (PPO/SB3) $\to$
+        \code{evaluate.py} / \code{walk\_forward.py} / \code{seed\_robustness.py}.
+  \item \textbf{Le générateur de scénarios} (volet IA générative) : package
+        \code{diffusion/} $\to$ \code{train\_diffusion.py} $\to$
+        \code{validate\_diffusion.py} (protocole pré-enregistré É1--É6).
+\end{enumerate}
+
+Le principe transversal : \emph{chaque étage est testé sur des données
+synthétiques aux propriétés connues avant d'être branché au suivant}
+(103 tests pytest, dont aucun ne dépend du réseau hors marqueurs dédiés).
+Les interfaces entre étages sont des artefacts explicites sur disque :
+\code{models/<exp>/} (poids + normalisation adjacente), \code{reports/*.json}
+(métriques), \code{reports/figures/*.png}.
+
+% ============================================================
+\section{Pipeline de données (\code{data\_loader.py})}
+% ============================================================
+
+\textbf{Source de vérité unique} : la dataclass \code{DataConfig} porte dates
+(2010--2023), tickers (AAPL, MSFT, GOOGL, SPY, TSLA) et ratios de split
+(70/15/15). Aucun script ne re-hardcode de dates.
+
+\textbf{Chaîne} : \code{\_download} (yfinance, \code{Close} ajusté uniquement)
+$\to$ \code{\_build\_features} $\to$ normalisation $\to$ split chronologique
+strict. Les 5 features et leur définition exacte :
+
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\code{log\_returns} & $\ln(P_t/P_{t-1})$ & stationnarise le prix \\
+\code{volatility} & std glissante 20 j des log-rendements & proxy GARCH \\
+\code{rsi} & RSI(14)/100 & borné $[0,1]$ \\
+\code{macd\_norm} & $(\mathrm{EMA}_{12}-\mathrm{EMA}_{26})/\mathrm{EMA}_{26}$ & momentum directionnel \\
+\code{momentum\_5} & $P_t/P_{t-5}-1$ & signal court terme \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Anti look-ahead} : le \code{RobustScaler} est \emph{fitté sur le train
+uniquement} puis appliqué à val/test --- la ligne la plus importante du
+fichier. \code{FEATURES} est volontairement dupliqué dans
+\code{environment.py} et un test vérifie la synchronisation des deux listes.
+
+\textbf{Multi-ticker} : chaque ticker est splitté \emph{séparément} (70/15/15
+sur sa propre histoire), puis les splits sont concaténés avec une colonne
+\code{segment\_id}. C'est elle qui permet à l'environnement de confiner les
+épisodes à un seul actif.
+
+\piege{Sans \code{segment\_id} sur les trois splits, un épisode de validation
+pouvait traverser la frontière GOOGL$\to$SPY ($\sim$1000\,\$ $\to$
+$\sim$300\,\$) : un faux krach de $-70\,\%$ que l'\code{EvalCallback}
+interprétait comme de la vraie donnée --- la sélection du meilleur modèle
+était corrompue (le bug décisif de l'itération 4 du rapport). Deuxième piège,
+symétrique, découvert au chantier diffusion : la colonne \code{log\_returns}
+du DataFrame final est \emph{scalée} --- le générateur recalcule ses
+rendements depuis la colonne \code{price} brute.}
+
+% ============================================================
+\section{L'environnement (\code{environment.py})}
+% ============================================================
+
+\subsection{Espaces}
+
+\textbf{Observation} (52 dimensions) : fenêtre glissante de
+$10 \text{ jours} \times 5$ features, aplatie, plus deux variables de
+portefeuille --- position courante ($-1/0/1$) et PnL latent. \textbf{Actions}
+(discrètes, 4) : \code{0=Hold}, \code{1=Long 100\,\%}, \code{2=Flat},
+\code{3=Short 100\,\%}. La sémantique est celle d'une machine à états : chaque
+action \emph{cible} un état de position, et l'environnement exécute les
+transactions nécessaires (une transition short$\to$long coûte deux trades :
+couverture puis achat).
+
+\subsection{Comptabilité --- la mécanique du short}
+
+Toute la comptabilité tient dans deux variables, \code{\_cash} et
+\code{\_shares} (négatif = dette de titres), et une identité :
+\[
+V_t = \mathrm{cash} + \mathrm{shares} \times P_t .
+\]
+Ouvrir un short de $N$ titres au prix $P_0$ : \code{\_shares} $= -N$,
+\code{\_cash} $\mathrel{+}= N P_0$ (proceeds), d'où
+$V_t = V_0 + N\,(P_0 - P_t)$ --- profit si le prix baisse, exactement la
+définition. Les frais (0.1\,\% par trade) sont débités du cash à
+\emph{chaque} passage, y compris à l'ouverture du short (le bug historique
+n°1 du projet : frais d'ouverture du short non débités, trouvé par le premier
+test de comptabilité).
+
+\subsection{Récompense : l'alpha par pas de temps}
+
+\begin{lstlisting}
+portfolio_return = (V_t - V_prev) / V_prev
+bh_return        = (P_t - P_prev) / P_prev
+alpha            = portfolio_return - bh_return
+reward           = clip(alpha * 100, -5, +5)   # reward_scaling, borne PPO
+\end{lstlisting}
+
+Etre flat pendant une baisse $\to$ récompense ; flat pendant une hausse $\to$
+pénalité ; long $\to$ neutre. L'agent est payé pour \emph{timer} le marché,
+pas pour le porter (le rapport, §« alpha de Jensen », en donne la lecture
+financière).
+
+\subsection{Fins d'épisode et modes de départ}
+
+Deux sorties distinctes au sens Gymnasium : \code{terminated} = kill-switch
+(drawdown $> 25\,\%$ depuis le pic --- une \emph{règle du jeu}, pas une
+prédiction), \code{truncated} = fin du segment de données. Au \code{reset},
+deux modes : départ aléatoire dans un segment aléatoire (entraînement --- la
+régularisation par les données), ou \code{options=\{"random\_start": False\}}
+pour l'épisode déterministe full-split de l'évaluation.
+
+% ============================================================
+\section{Entraînement RL (\code{train.py})}
+% ============================================================
+
+PPO (Stable-Baselines3), 4 environnements parallèles (\code{DummyVecEnv})
+enveloppés dans \code{VecNormalize(norm\_obs=True, norm\_reward=True)} :
+les observations \emph{et} les récompenses sont standardisées en ligne
+pendant l'entraînement. Hyperparamètres non par défaut, et pourquoi :
+
+\begin{center}\small
+\begin{tabular}{@{}llp{8.6cm}@{}}
+\toprule
+\code{clip\_range} & 0.15 & updates de politique plus conservateurs que le 0.2 standard \\
+\code{ent\_coef} & 0.05 & force l'exploration des 4 actions (sinon l'agent gèle sur Hold/Long) \\
+\code{n\_steps}/\code{batch} & 1024/128 & $4 \times 1024 = 4096$ transitions par update \\
+\code{total\_timesteps} & 800k & $\sim$10--15 min CPU \\
+\code{gamma} & 0.99 & horizon effectif $\sim$100 jours \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+La sélection de modèle est un \emph{early stopping par la validation} : un
+\code{EvalCallback} évalue périodiquement sur le split val et conserve
+\code{best\_model.zip} --- en normalisant les observations d'évaluation avec
+les statistiques du \code{VecNormalize} \emph{d'entraînement} (cohérence
+train/éval). Le \code{vec\_normalize.pkl} est sauvé \emph{à côté} du modèle :
+les deux forment un artefact indivisible.
+
+\piege{Prédire sur observations brutes avec un modèle entraîné sur
+observations normalisées donne des résultats faux mais plausibles --- l'erreur
+a été commise deux fois dans l'histoire du projet. D'où le contrat unique :
+tout chargement passe par \code{evaluate.load\_model\_and\_norm()}, qui
+recharge le \code{.pkl} adjacent, fige ses statistiques
+(\code{training=False}) et désactive la normalisation de récompense.}
+
+% ============================================================
+\section{Évaluation (\code{evaluate.py} et scripts de robustesse)}
+% ============================================================
+
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{Full-split déterministe} : départ fixe, politique
+        \code{deterministic=True}, tout le split de test. Si le kill-switch
+        stoppe l'épisode, la stratégie est \emph{gelée en cash jusqu'à la fin
+        de la fenêtre} (\code{freeze\_after\_stop}) --- sinon les horizons ne
+        seraient pas comparables entre stratégies stoppées et non stoppées.
+  \item \textbf{Garde-fou de config} : \code{EVAL\_ENV\_CFG} doit rester
+        alignée sur la config d'entraînement (frais 0.001, fenêtre 10,
+        drawdown 25\,\%) --- évaluer avec d'autres frais que ceux appris
+        fausse tout.
+  \item \textbf{Robustesse} : 5 sous-fenêtres aléatoires du test ;
+        \textbf{cross-ticker} : le modèle Multi évalué sur le test de chaque
+        actif.
+  \item \code{walk\_forward.py} : 5 réentraînements à fenêtre croissante
+        ancrée en 2010, une année civile 100\,\% out-of-sample par fold
+        (2018$\to$2022), grille année$\times$actif $\to$
+        \code{reports/walk\_forward.json}.
+  \item \code{seed\_robustness.py} : 4 réentraînements du Multi à seeds
+        différents $\to$ la \emph{bande de bruit inter-seeds}, le juge de paix
+        de toute expérience ultérieure (convention du repo : un candidat n'est
+        promu que s'il gagne \emph{hors} de cette bande).
+\end{itemize}
+
+% ============================================================
+\section{Le générateur de scénarios (package \code{diffusion/})}
+% ============================================================
+
+\subsection{Données (\code{dataset.py})}
+
+Fenêtres glissantes de $L=256$ jours de log-rendements \emph{bruts}
+(recalculés depuis \code{price}), stride 1, confinées par \code{segment\_id}
+$\to$ 10\,015 fenêtres sur le split train RL uniquement (zéro fuite vers
+val/test : condition pour brancher un jour la Phase 2). Normalisation
+\emph{globale} --- un seul couple $(\mu, \sigma)$ poolé, persisté dans
+\code{norm.json} : normaliser par fenêtre écraserait les régimes de
+volatilité, qui sont précisément ce qu'on veut apprendre. (C'est aussi, on le
+sait depuis le verdict, ce qui rend le problème dur : le modèle doit porter
+un \emph{mélange} d'échelles.)
+
+\subsection{Processus de diffusion (\code{schedule.py})}
+
+Tout le forward process tient dans les $\bar\alpha_t$ (produits cumulés des
+$1-\beta_t$, schedule cosine) et une forme fermée --- pas besoin d'itérer les
+$T$ pas pendant l'entraînement :
+
+\begin{lstlisting}
+def q_sample(self, x0, t, noise):
+    """x_t = sqrt(abar_t) * x0 + sqrt(1 - abar_t) * eps"""
+    ab = self.alpha_bars[t].view(-1, 1, 1)
+    return ab.sqrt() * x0 + (1.0 - ab).sqrt() * noise
+\end{lstlisting}
+
+\subsection{Réseau (\code{model.py}) et objectifs (\code{ddpm.py})}
+
+U-Net 1D de 0.56M paramètres : trois résolutions (256/128/64), blocs
+résiduels \code{Conv1d + GroupNorm + SiLU}, skip-connections symétriques,
+timestep injecté par embedding sinusoïdal + MLP dans chaque bloc. Conv finale
+initialisée à zéro (le réseau démarre en prédisant 0 : premiers pas
+d'entraînement stables). Deux objectifs implémentés :
+$\varepsilon$-prediction (v1) et \textbf{v-prediction} (v2),
+$v = \sqrt{\bar\alpha}\,\varepsilon - \sqrt{1-\bar\alpha}\,x_0$. Le sampling
+ancestral est paramétré par $\hat{x}_0$ avec clipping ($\pm 15\sigma$,
+garde-fou anti-divergence), et l'\textbf{EMA des poids} (decay 0.999) est le
+modèle évalué.
+
+\subsection{Le protocole de validation (\code{metrics.py, baselines.py,
+discriminative.py})}
+
+Chaque composant encode une leçon apprise pendant la calibration (É1 a rejeté
+le protocole v1 quatre fois avant de juger le moindre modèle) :
+
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{ACF par fenêtre puis moyennée} (jamais sur les fenêtres
+        concaténées : artefacts de jonction) ; bandes d'acceptation par
+        \emph{tirages de runs contigus} de fenêtres --- des tirages i.i.d. de
+        fenêtres chevauchantes (stride 1) écrasent la variance
+        d'échantillonnage et rejettent à tort (le bootstrap, marginales
+        exactes par construction, était rejeté).
+  \item \textbf{Anti-mémorisation} : distance L2 au plus proche voisin réel,
+        référencée contre la distance NN \emph{leave-one-out du réel sur
+        lui-même} en excluant les voisins chevauchants ($\pm L$ jours, même
+        segment) --- sans cette exclusion, le NN d'une fenêtre est sa voisine
+        décalée d'un jour et la métrique ne mesure rien.
+  \item \textbf{Juge discriminatif figé} : GRU(2$\to$64) sur les canaux
+        $(r, |r|)$ --- donner $|r|$ en entrée rend le juge directement
+        sensible à la dynamique de volatilité --- sorties moyennées dans le
+        temps, entrées clippées à $\pm 8\sigma$ (anti-collapse), médiane de 3
+        seeds (le juge mono-seed était bimodal : 0.88/0.94/0.50). Split
+        train/test par \emph{blocs contigus tirés au hasard avec embargo}
+        (purged split, de~Prado) : un split aléatoire fuit par le
+        chevauchement, un split «~fin de période en test~» fait apprendre
+        l'époque au lieu du réalisme.
+  \item \textbf{Baselines à rôle} : gaussienne i.i.d. (doit échouer queues et
+        clustering), bootstrap i.i.d. (marginales parfaites, clustering
+        détruit), GARCH(1,1)-$t$ fitté par ticker via \code{arch} mais
+        \emph{simulé en numpy maison} (déterminisme contrôlé par notre
+        générateur --- \code{arch.simulate} dépend d'un état global).
+  \item \textbf{Pré-enregistrement mécanique} : les bandes et ancres vivent
+        dans \code{reports/diffusion\_validation.json} ; le script les
+        \emph{réutilise} si la config est compatible au lieu de les recalculer
+        --- le contrat «~seuils écrits avant l'entraînement~» est appliqué par
+        le code, pas par la bonne volonté.
+\end{itemize}
+
+% ============================================================
+\section{La philosophie de tests --- et le test le plus rentable du projet}
+% ============================================================
+
+\code{conftest.py} ne fournit \emph{que} des données synthétiques : GBM pour
+les propriétés statistiques, prix constants ou à taux fixe pour la
+comptabilité \emph{exacte} des trades (on peut asserter le cash au centime).
+Le protocole de validation est lui-même testé sur des processus aux
+propriétés connues : ACF analytique d'un AR(1) ($\rho_k = \varphi^k$),
+clustering d'un GARCH simulé à la main, kurtosis d'une Student.
+
+Le test le plus rentable du projet --- écrit quand v1 et v2 ont échoué de
+façon identique et qu'il fallait départager «~modèle mauvais~» de «~sampler
+buggé~» : remplacer le réseau par le débruiteur \emph{optimal analytique}
+pour des données $\mathcal{N}(0,1)$ et vérifier que la boucle de génération
+reproduit $\mathcal{N}(0,1)$ :
+
+\begin{lstlisting}
+class Oracle:                       # E[eps | x_t] en forme fermee
+    def __call__(self, x, t):
+        if pred_type == "eps":
+            return (1 - sched.alpha_bars[t[0]]).sqrt() * x
+        return torch.zeros_like(x)  # E[v | x_t] = 0 pour N(0,1)
+
+out = DDPM.sample(ddpm_avec_oracle, 300, 64, seed=3)
+assert abs(out.std() - 1.0) < 0.03  # sampler exact => les verdicts tiennent
+\end{lstlisting}
+
+Verdict : std $= 0.9985$ pour les deux objectifs --- le sampler est exact, le
+NO-GO est un fait du \emph{modèle} (sous-engagement d'échelle sur le mélange
+multi-tickers), pas un bug. Quinze lignes qui ont sauvé la validité de deux
+runs de plusieurs heures.
+
+% ============================================================
+\section{Récapitulatif des pièges qui ont coûté cher}
+% ============================================================
+
+\begin{center}\small
+\begin{tabular}{@{}p{5.2cm}p{5.2cm}p{4.6cm}@{}}
+\toprule
+\textbf{Piège} & \textbf{Symptôme} & \textbf{Garde-fou actuel} \\
+\midrule
+Obs brutes au \code{predict} (2$\times$) & résultats faux mais plausibles &
+\code{load\_model\_and\_norm()} obligatoire \\
+Épisodes trans-tickers en val & faux krachs $-70\,\%$, best model tiré au
+sort & \code{segment\_id} sur les 3 splits + test \\
+Frais du short non débités & alpha gonflé silencieusement & tests de
+comptabilité exacte \\
+Colonne \code{log\_returns} scalée & distribution générative fausse &
+recalcul depuis \code{price} + test \\
+Bandes i.i.d. sur fenêtres chevauchantes & bootstrap rejeté à tort (É1) &
+tirages par runs contigus \\
+Split asymétrique du juge & sanité 0.39 au lieu de 0.5 & purged split +
+embargo, symétrique \\
+$\hat\nu < 4$ au MLE GARCH-$t$ & kurtosis échantillon 45 («~gold standard~»
+hors bande) & É2 du GARCH reporté, marginales jugées par le bootstrap \\
+Divergence du sampling non entraîné & valeurs $\sim 10^3$ & clip de
+$\hat{x}_0$ + test-oracle \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ============================================================
+\section{Conventions pour étendre le projet}
+% ============================================================
+
+\begin{itemize}[itemsep=2pt]
+  \item Un candidat s'entraîne dans SON dossier (\code{models/<exp>/}) et
+        n'est promu que s'il bat la bande de bruit inter-seeds (RL) ou passe
+        É1--É6 (générateur).
+  \item \code{PREDICTION.md} écrit dans le dossier d'expérience \emph{avant}
+        chaque run, confronté au mesuré dans le rapport.
+  \item Toute nouvelle métrique du protocole doit d'abord être testée sur une
+        distribution dont la réponse est connue.
+  \item Les bandes de \code{diffusion\_validation.json} sont figées --- juger
+        un nouveau générateur : \code{python validate\_diffusion.py
+        --model-dir models/<exp>/}, jamais de recalibration sans nouvelle
+        question de rapport.
+\end{itemize}
+
+\end{document}

@@ -9,6 +9,8 @@ __pycache__/
 *.pdf
 # … sauf le rapport compilé (livrable du repo)
 !reports/rapport_drl_portfolio.pdf
+# … et le complément d'architecture technique
+!reports/architecture_technique.pdf
 *.log
 *.csv
 *.claude/

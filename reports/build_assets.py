@@ -743,6 +743,15 @@ timeline_steps = [
      "de régime, testées contre cette bande : échec cohérent — voir le régime ne "
      "suffit pas, c'est la récompense qui doit inciter à s'en servir.",
      "juge de paix : ±6,5 pts"),
+    ("8", "Acte 4 : le générateur de scénarios (IA générative)",
+     "DDPM sur les rendements, protocole de validation pré-enregistré AVANT tout "
+     "entraînement (bandes calibrées sur le réel, critères É1-É6, prédiction datée "
+     "avant chaque run). É1 a d'abord rejeté mon propre protocole (4 défauts), puis "
+     "le modèle : deux itérations (ε-pred, v-pred), deux NO-GO — le volatility "
+     "clustering est capturé, mais le modèle sous-disperse le mélange d'échelles "
+     "multi-actifs (σ ×0,56, queue de vol ×0,43). Sampler disculpé par test-oracle "
+     "analytique ; le branchement RL reste verrouillé.",
+     "un négatif documenté, pas une v7 bricolée"),
 ]
 timeline_html = "".join(
     f'<div class="tl-item reveal"><div class="tl-dot">{n}</div>'
@@ -793,6 +802,7 @@ html = f"""<!DOCTYPE html>
   <a href="#walkforward">Walk-forward</a>
   <a href="#stress">Stress-tests</a>
   <a href="#chrono">Cheminement</a>
+  <a href="#diffusion">Diffusion</a>
   <a href="#verdict">Verdict</a>
 </nav>
 
@@ -831,6 +841,35 @@ chaque run) est dans le <a href="../reports/rapport_drl_portfolio.pdf">rapport P
 <div class="tl">{timeline_html}</div>
 </section>
 
+<section id="diffusion" class="reveal">
+<h2>Acte 4 — générateur de scénarios (diffusion)</h2>
+<p class="muted">Volet IA générative : un DDPM entraîné sur les rendements 2010-2019,
+jugé par un protocole <b>pré-enregistré</b> — bandes d'acceptation calibrées sur le
+réel, six critères d'échec écrits avant le premier entraînement, prédiction datée
+avant chaque run. Deux itérations, deux NO-GO : détail complet dans le
+<a href="../reports/rapport_drl_portfolio.pdf">rapport PDF</a> (Acte 4).</p>
+<div class="cards">
+  <div class="card"><div class="v up">✓ 0,143</div>
+    <div class="l">ACF|r| lag 1 — le volatility clustering est capturé,
+    dans la bande réelle [0,029 ; 0,160] (É4)</div></div>
+  <div class="card"><div class="v dn">✗ ×0,56</div>
+    <div class="l">échelle des rendements générés — sous-dispersion sur le
+    mélange d'échelles multi-actifs, queue de vol ×0,43 (É2)</div></div>
+  <div class="card"><div class="v dn">✗ 0,868</div>
+    <div class="l">juge discriminatif (seuil pré-enregistré : 0,682 = GARCH
+    fitté + 5 pts) — le réalisme global n'y est pas (É5)</div></div>
+  <div class="card"><div class="v up">✓ 7,9</div>
+    <div class="l">distance médiane au plus proche voisin réel (seuil 6,9) —
+    le modèle généralise, il ne recopie pas le train (É6)</div></div>
+</div>
+<p class="muted">Le sampler a été <b>disculpé par un test-oracle analytique</b>
+(débruiteur optimal en forme fermée → std 0,9985) : l'échec est un fait du modèle,
+pas un bug. Levier identifié pour une v3 hors budget : retirer le mélange d'échelles
+(normalisation par ticker) ou le donner à contrôler (conditionnement par la vol).
+Tant que le protocole ne passe pas, <b>aucun entraînement RL sur données
+synthétiques</b> — c'était la règle n°1 du chantier.</p>
+</section>
+
 <section id="verdict" class="reveal">
 <h2>Verdict honnête</h2>
 <div class="book">
@@ -851,8 +890,11 @@ chaque run) est dans le <a href="../reports/rapport_drl_portfolio.pdf">rapport P
       <li>La revendication robuste : <b>+14,5 % ± 6,5 d'alpha cross-actifs,
           positive pour 5 seeds d'entraînement sur 5</b> (test 2021-22).</li>
       <li>Protocole verrouillé : splits chronologiques, scaler anti look-ahead,
-          éval déterministe, 74 tests, ablations contrôlées, bande de bruit
+          éval déterministe, 103 tests, ablations contrôlées, bande de bruit
           inter-seeds comme juge de paix.</li>
+      <li>Volet génératif : protocole de validation de scénarios pré-enregistré
+          et auto-audité — É1 a rejeté deux fois, d'abord mon protocole (4 défauts),
+          puis mon modèle ; le DDPM capture le volatility clustering (É4).</li>
     </ul>
   </div>
   <div class="side short">
@@ -872,6 +914,10 @@ chaque run) est dans le <a href="../reports/rapport_drl_portfolio.pdf">rapport P
           bande de bruit : <b>échec cohérent</b> — l'incitation (récompense) prime sur
           l'information (observation). Prochain levier : position continue + récompense
           sensible au régime.</li>
+      <li>Le générateur de scénarios échoue É2/É5 deux fois (ε-pred puis v-pred) :
+          sous-dispersion ×0,56 du mélange d'échelles — la Phase 2 « RL sur
+          synthétique » reste verrouillée tant que les échantillons ne passent
+          pas le protocole.</li>
       <li>Sharpe &lt; 1, cinq méga-caps survivantes, emprunt de titres gratuit :
           pas un produit, un laboratoire.</li>
     </ul>

@@ -76,29 +76,42 @@ Si les chiffres changent, mettre aussi à jour la section **Results** du `README
   (`models/ppo_multi/`) que s'il gagne HORS bande de bruit inter-seeds.
 - venv du projet : `.venv/` (Python 3.12) — pas d'autre environnement.
 
-## Chantier suivant acté : Phase 1 diffusion (générateur de scénarios)
+## Chantier diffusion (Phase 1 — générateur de scénarios)
 
-Décision (juillet 2026, après l'Acte 3) : avant tout MARL, construire un **DDPM sur
-séries de RENDEMENTS** (jamais de prix bruts) comme **livrable autonome**.
-Positionnement : c'est le volet **IA générative** du portfolio de Martin (modélisation
-générative appliquée aux marchés) — le présenter comme tel dans le rapport et le CV.
+Décision d'origine (juillet 2026, après l'Acte 3) : avant tout MARL, construire un
+**DDPM sur séries de RENDEMENTS** (jamais de prix bruts) comme **livrable autonome**.
+Positionnement : volet **IA générative** du portfolio de Martin (modélisation
+générative appliquée aux marchés) — présenté comme tel dans le rapport et le CV.
 Motivation : le walk-forward montre que l'agent rate les régimes rares (rebond 2020)
 faute d'en avoir vus à l'entraînement → génération de scénarios = augmentation de
 données motivée par le diagnostic, pas par la mode.
 
-- **Phase 1 SEULE d'abord** : le générateur + son protocole de validation des samples —
-  distribution des rendements vs réel (moments, queues/kurtosis), ACF des rendements
-  (≈ 0) ET des rendements² ou |r| (positive persistante = volatility clustering),
-  éventuellement discriminative score façon TimeGAN. **Aucun branchement RL tant que
-  les samples ne passent pas la validation** — piège n°1 : entraîner l'agent sur du
-  synthétique subtilement irréaliste, atroce à diagnostiquer.
-- Phase 2 (plus tard, si Phase 1 validée) : curriculum réel/synthétique dans le
-  pipeline RL, jugé contre la bande de bruit inter-seeds et le walk-forward.
+**STATUT (juillet 2026) : Phase 1 EXÉCUTÉE — NO-GO documenté ×2, Phase 2 verrouillée.**
+Le générateur (package `diffusion/`, scripts `train_diffusion.py` /
+`validate_diffusion.py`) et son protocole pré-enregistré existent et sont testés.
+Récit complet : rapport Acte 4 (`sec:diffusion`).
+
+- **Protocole FIGÉ** : bandes/ancres dans `reports/diffusion_validation.json` — ne
+  PAS relancer `--calibration-only` sans raison (contrat de pré-enregistrement) ;
+  verdict v1 archivé dans `diffusion_validation_v1.json`. Juger un nouveau candidat :
+  `python validate_diffusion.py --model-dir models/<exp>/`.
+- **Acquis** : É3/É4/É6 passent (volatility clustering capturé : ACF|r| lag1 0.143
+  dans la bande réelle ; pas de mémorisation). **Échecs** : É2 (σ générée ×0.56,
+  queue de vol ×0.43 — sous-engagement d'échelle sur le mélange multi-tickers) et
+  É5 (disc 0.868 vs seuil 0.682) — identiques en ε-pred (v1) et v-pred (v2) ;
+  sampler disculpé par test-oracle analytique (test permanent de la suite).
+- **Levier v3 identifié, NON lancé (budget 2 itérations épuisé)** : retirer le
+  mélange d'échelles (normalisation PAR TICKER, échelle réinjectée au tirage) ou
+  conditionnement par la vol de fenêtre. À lancer uniquement comme nouvelle question
+  de rapport, avec nouvelle prédiction pré-enregistrée.
+- **Aucun branchement RL tant que les samples ne passent pas É1-É6** (piège n°1
+  inchangé) ; Phase 2 = curriculum réel/synthétique jugé contre bande inter-seeds
+  + walk-forward.
+- Conventions instanciées : `PREDICTION.md` AVANT chaque run dans le dossier
+  d'expérience (`models/diffusion_v1/`, `models/diffusion_v2/`) ; coût entraînement
+  MPS : ~75 min (25k steps) à ~230 min (50k).
 - Références DANS le repo : `2303.04137v5.pdf` (Diffusion Policy),
-  `2510.12253v1.pdf` (survey Diffusion×RL), `roadmap.md` phase 2 (TimeGrad,
-  structure `diffusion/` proposée).
-- Conventions inchangées : prédiction écrite avant chaque run, expérience dans son
-  dossier, chapitre de rapport par question fermée, tests pour tout module.
+  `2510.12253v1.pdf` (survey Diffusion×RL).
 
 ## Pièges connus
 

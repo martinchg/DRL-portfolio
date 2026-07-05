@@ -1131,6 +1131,253 @@ tout appeler « overfitting ». Maintenant je sépare trois choses :
 \end{itemize}
 
 % ============================================================
+\section{Acte 4 : le générateur de scénarios --- mon volet IA générative}
+\label{sec:diffusion}
+% ============================================================
+
+Le walk-forward avait laissé une question ouverte et chiffrée : le fold 2020 coûte un
+alpha moyen de $-146\,\%$ (tableau~\ref{tab:wf}), parce que l'agent n'a \emph{jamais vu}
+de rebond en V à l'entraînement --- les régimes rares sont, par définition, rares dans
+13 ans d'historique. Avant tout multi-agents, j'ai donc construit ce qui manquait :
+un \textbf{générateur de scénarios} --- un modèle de diffusion (DDPM) entraîné sur mes
+séries de \emph{rendements} --- pensé comme livrable autonome : c'est le volet
+\textbf{modélisation générative} de ce portfolio, au même titre que le RL en est le
+volet décisionnel. Deux garde-fous posés \emph{avant d'écrire la moindre ligne} :
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{honnêteté sur ce qu'un générateur peut faire} : entraîné sur
+        2010--2019, il ne peut pas « inventer 2020 ». Il \emph{densifie} les régimes
+        vus (corrections 2011, 2015, 2018) et permet d'en tirer plus de variantes,
+        notamment dans les queues --- l'argument est « plus de tirages là où
+        l'histoire est avare », pas « voir le futur » ;
+  \item \textbf{aucun branchement RL tant que les échantillons ne passent pas une
+        validation statistique} : entraîner un agent sur du synthétique subtilement
+        irréaliste est le pire scénario --- l'agent apprendrait des régularités qui
+        n'existent pas, et le bug serait atroce à diagnostiquer en aval. C'est le
+        piège n°1 du domaine, je l'ai traité comme tel.
+\end{itemize}
+
+\subsection{Le protocole avant le modèle}
+
+J'ai inversé l'ordre habituel : d'abord le \emph{juge}, ensuite le candidat. Le
+protocole compare quatre générateurs aux fenêtres réelles (10\,015 fenêtres de 256
+jours, split train RL uniquement --- zéro fuite vers val/test, condition pour brancher
+un jour la Phase 2) : une gaussienne i.i.d. (contrôle négatif), un bootstrap i.i.d.
+des rendements réels (marginales parfaites par construction, clustering détruit par
+construction), un GARCH(1,1)-$t$ fitté par actif (la barre classique : si mon DDPM ne
+fait pas mieux qu'un modèle à 4 paramètres, il ne justifie pas sa complexité), et le
+DDPM. Les métriques sont les faits stylisés canoniques (Cont, 2001) --- kurtosis et
+quantiles des rendements poolés, ACF des rendements ($\approx 0$ : pas d'alpha gratuit),
+ACF de $|r|$ (positive et persistante : le \emph{volatility clustering}, cf.\ ma section
+GARCH en annexe) --- plus trois métriques orientées usage : les distributions
+\emph{par fenêtre} de vol réalisée, de max drawdown et de rendement terminal (ce que
+l'environnement RL « verrait » d'un épisode synthétique), un \textbf{score
+discriminatif} façon TimeGAN (un petit GRU figé essaie de distinguer réel et
+synthétique ; 0{,}5 = indiscernable), et une métrique \textbf{anti-mémorisation}
+(distance de chaque échantillon à sa plus proche fenêtre réelle, comparée à la
+distance du réel à lui-même).
+
+Le point méthodologique auquel je tiens : \textbf{aucun seuil arbitraire}. Chaque
+métrique reçoit une bande d'acceptation qui est la distribution d'échantillonnage de
+cette métrique \emph{sous le réel} (200 tirages de 1\,000 fenêtres réelles), et six
+critères d'échec É1--É6 ont été \textbf{pré-enregistrés} --- écrits dans un JSON,
+avec leurs seuils, \emph{avant} le premier entraînement, ainsi qu'une prédiction datée
+avant chaque run. É1 est le méta-critère : le réel jugé contre ses propres bandes doit
+passer, et chaque baseline doit échouer exactement là où sa construction l'y condamne
+--- sinon c'est le protocole qui est faux, pas les modèles.
+
+\subsection{É1 rejette mon protocole v1 --- quatre leçons avant le premier modèle}
+
+La première calibration a fait exactement ce pour quoi É1 existe : elle a invalidé mon
+propre protocole, quatre fois, avant qu'aucun DDPM ne soit jugé.
+
+\begin{itemize}[itemsep=3pt]
+  \item \textbf{Bandes faussement étroites.} Bande de kurtosis v1 : $[13{,}25;\,
+        15{,}12]$ --- et le bootstrap, dont les marginales sont \emph{exactes} par
+        construction, rejeté à 12{,}81. Cause : mes fenêtres glissantes se chevauchent
+        (stride 1) ; des tirages i.i.d. de fenêtres rééchantillonnent presque la même
+        série, écrasant la variance d'échantillonnage. Remède : tirages par \emph{runs
+        contigus} de 256 fenêtres --- chaque tirage inclut ou exclut des régimes
+        entiers. Bande honnête : $[3{,}7;\, 20{,}1]$.
+  \item \textbf{Un juge qui apprenait l'époque, pas le réalisme.} Test de sanité :
+        opposer au juge deux moitiés entrelacées du réel --- attendu $\approx 0{,}5$,
+        mesuré $0{,}39$. Mon split donnait au réel un test « fin de période » et au
+        faux un test « toutes périodes » : le GRU classait l'\emph{époque}. Remède :
+        splits par blocs contigus tirés au hasard, purgés avec embargo autour des blocs
+        de test (l'idée des purged splits de de~Prado, ici au niveau des fenêtres).
+        Sanité v2 : $0{,}478$. Au passage, une mesure gratuite : le juge ne distingue
+        pas 2010--2014 de 2015--2019 (acc $0{,}47$) --- la non-stationnarité de mes
+        données est indétectable à cette granularité.
+  \item \textbf{Un juge bimodal.} Même configuration, trois seeds : accuracies 0{,}88,
+        0{,}94\ldots{} et 0{,}50 --- collapse d'optimisation occasionnel, favorisé par
+        les rendements extrêmes ($|z|$ jusqu'à 12) qui saturent le GRU. Remède : entrées
+        clippées à $\pm 8\sigma$ et médiane de trois entraînements. Le juge devient
+        net : gaussienne détectée à 0{,}91, bootstrap à 0{,}89.
+  \item \textbf{La baseline « gold standard » échoue elle-même le critère des
+        queues.} Kurtosis des échantillons GARCH : 44{,}8, contre 14--15 pour le réel.
+        Ce n'est pas un bug : le MLE donne $\hat{\nu} \in [3{,}8;\,4{,}8]$ (sous 4, le
+        quatrième moment d'une Student est \emph{infini}), et pour AAPL
+        ($\alpha=0{,}167$, $\beta=0{,}823$) la condition d'existence de la kurtosis
+        inconditionnelle est violée même à innovations gaussiennes. J'ai donc acté :
+        É2 du GARCH \emph{reporté mais non exigé} (le contrôle des marginales
+        appartient au bootstrap), GARCH exigé sur É3/É4 et comme ancre d'É5. Leçon de
+        desk : le juge d'un backtest s'audite comme le backtest lui-même.
+\end{itemize}
+
+Calibration v2 : É1 entièrement vert, bandes et ancres \textbf{figées} --- seuil É5 =
+accuracy GARCH $+5$ points $= 0{,}682$ ; seuil É6 = percentile 10 des distances NN du
+réel à lui-même $= 6{,}91$.
+
+\subsection{v1 : un NO-GO qui contredit ma prédiction --- dans les deux sens}
+
+Prédiction pré-enregistrée avant le run v1 (U-Net 1D de 0{,}56M paramètres,
+$\varepsilon$-prediction, $T=1000$, 25\,000 pas, 75 min) : \emph{les marginales
+passeront (É2), le point de friction sera la persistance longue de l'ACF de $|r|$
+(É4) --- trop dure à capturer pour un U-Net sans attention.} Le verdict mesuré a
+inversé mes deux paris :
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Critère} & \textbf{Prédit} & \textbf{Mesuré} & \textbf{Chiffre} \\
+\midrule
+É2 queues          & passe            & \ko{échec} & kurtosis $35{,}8 \notin [3{,}7;\,20{,}1]$ \\
+É3 ACF parasite    & passe            & \ok{passe} & lags 1--5 dans la bande \\
+É4 clustering      & \emph{échec}     & \ok{passe} & lag 1 : $0{,}139 \in [0{,}029;\,0{,}160]$ \\
+É5 discriminatif   & 0{,}60--0{,}75   & \ko{échec} & acc $0{,}868 > 0{,}682$ \\
+É6 mémorisation    & passe            & \ok{passe} & méd. NN $8{,}21 \geq 6{,}91$ \\
+\bottomrule
+\end{tabular}
+\caption{DDPM v1 contre les critères pré-enregistrés : NO-GO (3/5). Ma crainte
+principale (É4) était infondée ; le vrai défaut était ailleurs.}
+\label{tab:ddpm_v1}
+\end{table}
+
+Le U-Net capture donc le volatility clustering --- le fait stylisé que je jugeais le
+plus difficile. Le vrai symptôme : \textbf{écart-type généré $0{,}0106$ contre
+$0{,}0185$ pour le réel}, un rétrécissement de $43\,\%$, \emph{uniforme} sur toute la
+distribution de vol par fenêtre (chaque quantile $\approx \times 0{,}6$) --- ce n'est
+pas un effondrement vers un mode, c'est une échelle globalement fausse. La kurtosis
+explosée en découle (elle est sans échelle : des pointes normales deviennent énormes
+relativement à une dispersion trop faible), et le juge discriminatif n'a plus qu'à
+lire le niveau moyen de $|r|$. J'ai éliminé l'EMA comme suspect (les poids bruts font
+\emph{pire} : z-std $0{,}52$).
+
+Le mécanisme, une fois vu, est limpide et propre aux données financières : des
+rendements journaliers sont quasi \emph{blancs} --- le signal et le bruit de diffusion
+ont la même texture. Le réseau qui prédit $\varepsilon$ sur-attribue une fraction
+infime du signal au bruit, et cette fraction se \emph{compose sur les 1\,000 pas} du
+processus inverse : un biais de $6 \times 10^{-4}$ par pas suffit à produire
+$\times 0{,}55$. Sur des images, la structure spatiale protège ; sur du bruit financier,
+rien ne protège.
+
+\subsection{L'expérience contrôlée qui a choisi la v2}
+
+Plutôt que d'empiler des correctifs, j'ai isolé la question sur un processus dont je
+connais la vérité : un GARCH-$t$ simulé (z-std vraie $=1$), deux petits DDPM identiques
+à l'objectif près, 4\,000 pas chacun. Résultat : $\varepsilon$-prediction $\to$ z-std
+$1{,}293$ ; \textbf{v-prediction} (Salimans \& Ho, 2022 : le réseau prédit
+$v = \sqrt{\bar\alpha}\,\varepsilon - \sqrt{1-\bar\alpha}\,x_0$, un objectif bien
+conditionné à tous les niveaux de bruit) $\to$ z-std $0{,}945$. L'instabilité d'échelle
+est bien un artefact de l'objectif, pas du réseau.
+
+Configuration v2, et prédiction pré-enregistrée avant le run : v-prediction, 50\,000
+pas (la loss v1 descendait encore --- les queues s'apprennent en dernier), décroissance
+cosine du learning rate ($2\cdot10^{-4} \to 10^{-5}$ : la calibration fine d'échelle se
+joue en fin d'entraînement). \emph{Prédit : É2, É3, É4, É6 passent ; tout se joue sur
+É5, accuracy attendue entre 0{,}62 et 0{,}72 contre un seuil à 0{,}682 --- GO probable
+mais non certain. Budget affiché : deux itérations sérieuses, puis on documente,
+y compris un échec.}
+
+\subsection{Verdict v2 : NO-GO --- et le vrai coupable n'était aucun des deux objectifs}
+
+La v2 (50\,000 pas, 3\,h48) échoue sur les \emph{mêmes} critères que la v1 :
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Critère} & \textbf{v1 ($\varepsilon$-pred)} & \textbf{v2 (v-pred)} & \textbf{v2, chiffre} \\
+\midrule
+É2 queues        & \ko{échec} & \ko{échec} & kurtosis $45{,}0$ ; $\sigma$ générée $0{,}0103$ vs $0{,}0185$ \\
+É3 ACF parasite  & \ok{passe} & \ok{passe} & lags 1--5 dans la bande \\
+É4 clustering    & \ok{passe} & \ok{passe} & lag 1 : $0{,}143 \in [0{,}029;\,0{,}160]$ ; somme $0{,}93$ \\
+É5 discriminatif & \ko{échec} & \ko{échec} & acc $0{,}868$ (seuil $0{,}682$) \\
+É6 mémorisation  & \ok{passe} & \ok{passe} & méd. NN $7{,}91 \geq 6{,}91$ \\
+\bottomrule
+\end{tabular}
+\caption{v1 et v2 contre les critères pré-enregistrés. Ma prédiction v2 (« GO probable,
+$\sim$60\,\% ») est falsifiée --- et l'indice décisif est dans la répétition : le
+rétrécissement de variance est $\times 0{,}56$ en v2 contre $\times 0{,}57$ en v1,
+\emph{identique sous deux objectifs différents}.}
+\label{tab:ddpm_v2}
+\end{table}
+
+Un même symptôme sous deux paramétrisations, ça ne ressemble plus à un problème
+d'objectif --- ça ressemble à un bug de \emph{sampling}. Avant de conclure quoi que ce
+soit, j'ai écrit le test qui tranche : remplacer le réseau par le débruiteur
+\emph{optimal analytique} pour des données $\mathcal{N}(0,1)$ (calculable en forme
+fermée pour les deux objectifs) et faire tourner la boucle de génération telle
+quelle. Résultat : écart-type $0{,}9985$ pour les deux --- \textbf{le sampler est
+exact}, les deux verdicts sont valides, et ce test-oracle est resté dans ma suite de
+tests. Réflexe transposé du RL : quand le simulateur est soupçonnable, on ne débat
+pas, on l'audite.
+
+Le vrai coupable apparaît dans la décomposition par quantile de la vol par fenêtre :
+le ratio généré/réel vaut $\approx 0{,}6$ sur presque toute la distribution, mais
+$0{,}43$ au quantile 95. Le modèle sous-disperse partout ET refuse en plus de
+s'engager sur les fenêtres de haute volatilité. Or ma micro-expérience de contrôle
+(GARCH, où v-pred calibrait bien l'échelle) portait sur un processus à échelle
+\emph{unique} --- alors que mes données réelles sont un \textbf{mélange d'échelles}
+(TSLA $\approx 3\times$ SPY, régimes calmes contre crises), assumé dès le choix de la
+normalisation globale. Un débruiteur entraîné en espérance conditionnelle sur un
+mélange régresse vers le centre du mélange : il « moyenne » les échelles au lieu d'en
+choisir une par fenêtre. La kurtosis explosée (45) et le juge discriminatif à 0{,}868
+sont deux lectures du même fait.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{diffusion_acf.png}
+\caption{Ce qui est acquis : l'ACF des rendements reste dans la bande ($\approx 0$,
+pas d'alpha fantôme --- É3), et l'ACF de $|r|$ du DDPM (rouge) est dans la bande
+réelle : le volatility clustering est capturé (É4), là où les deux baselines i.i.d.
+s'effondrent à zéro.}
+\label{fig:diffusion_acf}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{diffusion_window_stats.png}
+\caption{Ce qui condamne : les distributions \emph{par fenêtre} vues par
+l'environnement RL. La vol réalisée du DDPM (rouge) est décalée d'un facteur
+$\approx 0{,}6$ vers la gauche, et sa queue haute --- les fenêtres de crise,
+précisément celles pour lesquelles ce générateur existe --- est la plus atrophiée
+(ratio $0{,}43$ au q95).}
+\label{fig:diffusion_windows}
+\end{figure}
+
+Budget pré-enregistré épuisé : deux itérations sérieuses, deux NO-GO --- je m'arrête
+et je documente, comme je l'avais écrit avant de commencer. Le bilan n'est pas nul,
+il est précis : un protocole de validation calibré, auto-audité et réutilisable ; un
+générateur qui capture la structure temporelle (clustering) mais pas la structure
+d'\emph{échelle} d'un mélange multi-actifs ; un mécanisme d'échec compris, mesuré,
+reproductible ; et un levier clair pour une éventuelle v3 \emph{hors de ce budget} :
+retirer le mélange d'échelles du problème (normalisation par ticker, l'échelle étant
+réinjectée au tirage) ou le donner à contrôler au modèle (conditionnement par la vol
+de la fenêtre). La Phase 2 --- brancher du synthétique dans le pipeline RL --- reste
+verrouillée : c'était tout l'intérêt d'avoir écrit la règle avant les résultats.
+
+\subsection{Ce que ça ouvre}
+
+La Phase 2 --- brancher le générateur dans le pipeline RL --- a maintenant sa condition
+d'entrée écrite : des échantillons qui passent É1--É6, et un juge dont je connais les
+limites. Le protocole lui-même est réutilisable tel quel pour tout générateur futur
+(TimeGrad, conditionnement par régime pour fabriquer \emph{à volonté} des krachs et
+des rebonds --- la réponse directe au fold 2020). Et la règle de jugement ne change
+pas : tout apport du synthétique au RL se mesurera contre la bande de bruit
+inter-seeds et le walk-forward, pas contre un backtest unique.
+
+% ============================================================
 \section{Limites honnêtes et travaux futurs}
 \label{sec:limites}
 % ============================================================
@@ -1156,13 +1403,26 @@ tout appeler « overfitting ». Maintenant je sépare trois choses :
         (le Multi tient jusqu'à 30\,bp).
   \item \textbf{Walk-forward simplifié} : 400k pas par fold, folds annuels, pas
         d'agrégation en portefeuille multi-actifs.
+  \item \textbf{Le générateur densifie, il n'invente pas} (section~\ref{sec:diffusion}) :
+        entraîné sur 2010--2019, il recombine et rééchantillonne les régimes vus ---
+        il ne produira pas un COVID s'il n'en a pas vu. L'apport attendu en Phase 2
+        est « plus de tirages dans les queues apprises », et cette promesse-là reste
+        à démontrer contre la bande inter-seeds.
+  \item \textbf{Générateur univarié, tickers poolés} : un échantillon = un
+        pseudo-actif isolé. Pas de corrélations croisées entre actifs --- suffisant
+        pour mon environnement mono-actif, insuffisant pour toute extension
+        portefeuille.
+  \item \textbf{Génération non conditionnelle} : je ne contrôle pas le régime généré
+        (impossible de demander « un krach »). Le conditionnement par régime est
+        l'extension naturelle si la Phase 2 veut un curriculum ciblé.
 \end{itemize}
 
 À plus long terme, la feuille de route du dépôt (\code{roadmap.md}) prévoit le
-multi-agents (adversaire de marché, MAPPO --- section~\ref{sec:marl}) et la génération
-de scénarios par modèles de diffusion ; mes lectures récentes (survey des modèles de
-diffusion pour le RL, survey de l'apprentissage de représentations d'état) alimenteront
-ces phases --- avec, cette fois, un protocole d'évaluation digne de mesurer leur apport.
+multi-agents (adversaire de marché, MAPPO --- section~\ref{sec:marl}). La génération
+de scénarios par diffusion, elle, a désormais sa Phase 1 mesurée
+(section~\ref{sec:diffusion}) ; la Phase 2 --- le curriculum réel/synthétique dans le
+pipeline RL --- ne sera lancée que sur des échantillons validés, et jugée avec le même
+protocole que tout le reste : bande de bruit inter-seeds et walk-forward.
 
 % ============================================================
 \section{Glossaire minute}
@@ -1205,6 +1465,14 @@ d'avant-entretien.
         seulement où elle commence, et elle est sous-additive (diversifier ne peut pas
         l'augmenter) --- ce que la VaR ne garantit pas ; d'où son adoption
         réglementaire (FRTB).
+  \item[DDPM (modèle de diffusion)] Modèle génératif en deux processus : l'un,
+        \emph{fixe}, détruit progressivement une donnée en $T$ pas de bruit gaussien
+        (il n'y a rien à apprendre) ; l'autre, appris, inverse cette destruction pas à
+        pas --- générer = partir d'un bruit pur et débruiter $T$ fois. Ici : générateur
+        de fenêtres de 256 jours de rendements (section~\ref{sec:diffusion}), le volet
+        IA générative du projet. Piège : sur des rendements quasi blancs, signal et
+        bruit ont la même texture --- un biais infime du débruitage se compose sur les
+        $T$ pas (ma v1 : variance rétrécie de $43\,\%$).
   \item[Drawdown] Perte courante depuis le dernier pic :
         $DD_t = (\max_{s \le t} V_s - V_t)/\max_{s \le t} V_s$. Le \emph{max drawdown}
         en est le pire cas sur la période. C'est le risque « vécu » : un investisseur
@@ -1222,6 +1490,12 @@ d'avant-entretien.
         information, y compris privée). Mon agent ne consommant que des prix passés,
         ce projet teste la forme faible --- et conclut à un edge modeste, défensif et
         régime-dépendant : une violation limite, pas une réfutation.
+  \item[EMA (des poids)] Moyenne mobile exponentielle des paramètres du réseau,
+        maintenue en parallèle de l'entraînement ($\theta_{\text{EMA}} \leftarrow
+        0{,}999\,\theta_{\text{EMA}} + 0{,}001\,\theta$). C'est \emph{elle} qu'on
+        évalue : les poids instantanés vibrent avec les derniers minibatches, la
+        moyenne lissée échantillonne mieux --- standard dans la littérature diffusion.
+        À ne pas confondre avec l'early stopping : l'EMA lisse, elle ne sélectionne pas.
   \item[Entropie (bonus d')] $\mathcal{H}[\pi] = -\sum_a \pi(a)\log\pi(a)$, maximale
         quand la politique hésite uniformément. Un petit bonus ($c_2 = 0{,}05$)
         récompense cette hésitation résiduelle → l'agent continue d'explorer au lieu
@@ -1237,6 +1511,12 @@ d'avant-entretien.
         le même résultat, au centime. C'est mon évaluation de référence --- la
         version « fenêtres aléatoires » ne sert plus qu'à mesurer la robustesse au
         point d'entrée.
+  \item[Faits stylisés] Les régularités statistiques universelles des rendements
+        financiers (Cont, 2001) : queues épaisses (kurtosis $\gg 0$), autocorrélation
+        des rendements $\approx 0$ (sinon alpha gratuit), autocorrélation de $|r|$
+        positive et persistante (volatility clustering), asymétrie gain/perte. Ce sont
+        les axes de mon protocole de validation des scénarios synthétiques : un
+        générateur qui les viole fabriquerait un marché qui n'existe pas.
   \item[Fonction de valeur $V(s)$] L'estimation, par le critique, de ce qu'un état
         rapportera en moyenne sous la politique courante. C'est l'« attente » dont
         l'avantage mesure l'écart, et la baseline qui réduit la variance du gradient
@@ -1277,6 +1557,21 @@ d'avant-entretien.
         à jour ne peut trop déplacer la politique, quel que soit le lot d'expérience
         --- la stabilité avant la vitesse, indispensable sur données bruitées
         (perte complète en annexe~\ref{app:ppo}).
+  \item[Purged split (embargo)] Découpage train/test pour données qui se
+        \emph{chevauchent} (mes fenêtres glissantes) : blocs contigus tirés au hasard,
+        et on écarte du train tout ce qui touche un bloc de test à moins d'une fenêtre
+        (l'embargo, à la de~Prado). Sans lui, deux pièges symétriques : le split
+        aléatoire fuit (fenêtres à un jour d'écart des deux côtés), le split « fin de
+        période en test » fait apprendre l'époque au lieu du phénomène --- mon juge
+        discriminatif est tombé dans le second (acc $0{,}39$ sur un test qui devait
+        donner $0{,}5$).
+  \item[Score discriminatif] Métrique de réalisme façon TimeGAN : un petit classifieur
+        \emph{figé à l'avance} apprend à distinguer fenêtres réelles et synthétiques ;
+        accuracy $0{,}5$ = indiscernables. Le mien détecte la gaussienne i.i.d. à
+        $0{,}91$ et le GARCH fitté à $0{,}63$ --- ce dernier chiffre sert d'ancre : un
+        générateur appris doit faire au moins aussi bien qu'un modèle à 4 paramètres.
+        Piège : un juge plus gros trouve toujours quelque chose --- le seuil n'a de
+        sens que juge constant.
   \item[Seed] Graine du générateur pseudo-aléatoire. La fixer rend l'expérience
         exactement reproductible (comparer deux versions du code à hasard identique) ;
         la faire \emph{varier} mesure la sensibilité au hasard --- mesurée à
@@ -1288,6 +1583,14 @@ d'avant-entretien.
         ne pénalise pas les bonnes surprises), au max drawdown (Calmar). Un desk
         regarde les trois : un bon Sharpe avec un Calmar médiocre signale des pertes
         concentrées.
+  \item[v-prediction] Reparamétrisation de l'objectif de diffusion (Salimans \& Ho,
+        2022) : au lieu du bruit $\varepsilon$, le réseau prédit
+        $v = \sqrt{\bar\alpha}\,\varepsilon - \sqrt{1-\bar\alpha}\,x_0$ --- un mélange
+        qui pivote continûment de « prédire le bruit » (faible bruit) à « prédire la
+        donnée » (fort bruit). Mieux conditionné à tous les niveaux de bruit ; sur mes
+        rendements quasi blancs, c'est ce qui a corrigé le rétrécissement de variance
+        de l'$\varepsilon$-prediction (mesuré sur GARCH contrôlé : z-std $1{,}293
+        \to 0{,}945$).
   \item[VecNormalize] Standardisation \emph{glissante} des observations pendant
         l'entraînement (moyenne et variance mises à jour en continu). Ses
         statistiques font partie du modèle : les recharger à l'évaluation est
@@ -1308,7 +1611,13 @@ d'avant-entretien.
   \item Entraînement complet : \code{python train.py} ($\sim$10--15 min CPU) ;
   \item Rapport d'évaluation : \code{python evaluate.py} ;
   \item Walk-forward : \code{python walk\_forward.py} ($\sim$25 min, 5 folds) ;
-  \item Suite de tests : \code{python -m pytest} (74 tests ; marqueurs \code{network}
+  \item Diffusion --- calibration du protocole puis entraînement puis verdict :
+        \code{python validate\_diffusion.py --calibration-only}, puis
+        \code{python train\_diffusion.py} ($\sim$75 min MPS en v1), puis
+        \code{python validate\_diffusion.py --model-dir models/diffusion\_v2}
+        ($\sim$20 min ; bandes réutilisées telles quelles --- contrat de
+        pré-enregistrement) ;
+  \item Suite de tests : \code{python -m pytest} (101 tests ; marqueurs \code{network}
         et \code{slow} pour l'intégration) ;
   \item Figures de ce rapport + dashboard statique : \code{python reports/build\_assets.py} ;
   \item Dashboard interactif : \code{streamlit run dashboard.py}.
