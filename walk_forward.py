@@ -60,6 +60,10 @@ class WalkForwardConfig:
     timesteps  : int = 400_000
     # Features de régime (Acte 3) : dist_high_252 + trend_200 dans l'observation
     regime_features : bool = False
+    # Override d'ent_coef pour les folds (Acte 5 : 0.01 en continu — sur une
+    # gaussienne, le 0.05 discret gonfle l'écart-type → bruit de position).
+    # None = valeur par défaut de TrainConfig.
+    ent_coef   : Optional[float] = None
     out_dir    : str = "models/walk_forward"
     json_path  : str = "reports/walk_forward.json"
 
@@ -179,11 +183,13 @@ def run_walk_forward(cfg: WalkForwardConfig = WalkForwardConfig(),
         print(f"  Train : {len(train_data)} jours | Val : {len(val_data)} jours")
 
         fold_dir = os.path.join(cfg.out_dir, f"fold_{fold.test_year}") + os.sep
+        overrides = {} if cfg.ent_coef is None else {"ent_coef": cfg.ent_coef}
         cfg_train = TrainConfig(
             total_timesteps = cfg.timesteps,
             model_name      = "ppo_wf",
             save_dir        = fold_dir,
             log_dir         = os.path.join(fold_dir, "logs") + os.sep,
+            **overrides,
         )
         with contextlib.redirect_stdout(io.StringIO()):
             train(train_data, val_data, env_cfg, cfg_train)

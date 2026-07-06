@@ -118,7 +118,10 @@ def _run_episode(model, env, seed, vec_normalize=None, random_start=True,
             else:
                 obs_input = obs
             action, _ = model.predict(obs_input, deterministic=True)
-            obs, _, terminated, truncated, _ = env.step(int(action))
+            # Discret : SB3 renvoie un array 0-d → cast int.
+            # Continu : le vecteur de poids passe tel quel (clippé par l'env).
+            step_action = action if env.cfg.continuous else int(action)
+            obs, _, terminated, truncated, _ = env.step(step_action)
             done = terminated or truncated
 
     portfolio = np.array(env.history["portfolio_values"], dtype=float)
@@ -135,12 +138,31 @@ def _run_episode(model, env, seed, vec_normalize=None, random_start=True,
             prices    = np.concatenate([prices, rest])
 
     metrics = _metrics_from_series(portfolio, prices)
+
+    # Distribution des décisions — MÊMES clés dans les deux modes pour que
+    # l'aval (frames, dashboard, JSON) reste compatible. En continu :
+    # long/flat/short lus sur le poids (seuil ±0.2), hold = pas de
+    # rebalancement significatif (|Δw| < 0.01).
+    if env.cfg.continuous and len(actions):
+        w = actions.astype(float)
+        dw = np.abs(np.diff(w, prepend=w[0]))
+        action_stats = {
+            "hold_pct"  : float((dw < 0.01).mean()),
+            "long_pct"  : float((w > 0.2).mean()),
+            "flat_pct"  : float((np.abs(w) <= 0.2).mean()),
+            "short_pct" : float((w < -0.2).mean()),
+        }
+    else:
+        action_stats = {
+            "hold_pct"  : (actions == 0).mean(),
+            "long_pct"  : (actions == 1).mean(),
+            "flat_pct"  : (actions == 2).mean(),
+            "short_pct" : (actions == 3).mean(),
+        }
+
     metrics.update({
         "n_trades"         : env.history["n_trades"],
-        "hold_pct"         : (actions == 0).mean(),
-        "long_pct"         : (actions == 1).mean(),
-        "flat_pct"         : (actions == 2).mean(),
-        "short_pct"        : (actions == 3).mean(),
+        **action_stats,
         "n_steps"          : len(portfolio),
         "terminated_early" : bool(terminated),   # stoppé par drawdown max
     })

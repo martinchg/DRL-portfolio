@@ -17,5 +17,5 @@ __pycache__/
 
 # Runs TensorBoard — bruit régénérable, jamais versionné
 **/events.out.tfevents.*
-**/PPO_*/
+**/PPO_[0-9]*/
 

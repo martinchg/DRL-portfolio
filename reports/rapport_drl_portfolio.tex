@@ -1378,15 +1378,100 @@ pas : tout apport du synthétique au RL se mesurera contre la bande de bruit
 inter-seeds et le walk-forward, pas contre un backtest unique.
 
 % ============================================================
+\section{Acte 5 : le sizing n'était pas la réponse --- deux dégénérescences
+et un diagnostic affiné}
+\label{sec:continuous}
+% ============================================================
+
+L'Acte 3 avait falsifié la piste « information » (voir le régime ne suffit pas) et
+conclu que le levier suivant était \emph{l'incitation} : position continue
+$w \in [-1, 1]$ et aversion au risque dépendante du régime. J'ai testé les deux,
+en deux bras pré-enregistrés à un delta chacun : \textbf{bras A} = sizing continu
+seul, récompense inchangée (isoler l'effet du dimensionnement) ; \textbf{bras B} =
+A $+$ pénalité $\lambda\,\hat\sigma_t\,|w|$ ($\lambda = 0{,}1$, une seule valeur,
+pas de tuning) --- porter de l'exposition coûte d'autant plus que le marché est
+nerveux, pour payer le dérisquage \emph{avant} le kill-switch. Mécanique :
+même comptabilité cash/titres (le short fractionnaire est un nombre de titres
+négatif), frais sur le notionnel échangé, bande de non-rebalancement de
+$0{,}5\,\%$ contre l'hémorragie de frais du jitter gaussien. Critères figés avant
+les runs : C1 cross-actifs $\geq +10{,}7\,\%$ (headline $-$ bande de seed), C2
+fold 2020 $> -50\,\%$, C3 fold 2022 $> +20\,\%$, C4 médiane walk-forward
+$\geq -2\,\%$.
+
+\subsection{Prédit contre mesuré : falsifié dans le mauvais sens}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lllll@{}}
+\toprule
+\textbf{Critère} & \textbf{Prédit A} & \textbf{Mesuré A} & \textbf{Prédit B} & \textbf{Mesuré B} \\
+\midrule
+C1 cross-actifs & passe & \ko{$+4{,}5\,\%$} & --- & \ko{$+9{,}2\,\%$} \\
+C2 fold 2020    & $-80 \pm 30\,\%$ & \ko{$-155\,\%$} & $< -50\,\%$ plausible & \ko{$-154\,\%$} \\
+C3 fold 2022    & passe & \ok{$+40{,}9\,\%$} & risque principal & \ok{$+28{,}8\,\%$} \\
+C4 médiane WF   & --- & \ko{$-5{,}8\,\%$} & --- & \ko{$-24{,}8\,\%$} \\
+\bottomrule
+\end{tabular}
+\caption{Acte 5 : double NO-GO. J'avais prédit que le sizing améliorerait
+partiellement 2020 ($-146 \to -80$) ; il l'a légèrement \emph{aggravé}. Seul
+l'alpha défensif 2022 progresse.}
+\label{tab:continuous}
+\end{table}
+
+\subsection{Deux dégénérescences, diagnostiquées}
+
+\paragraph{Bras A : le bang-bang déguisé.} J'ai rejoué la politique sur le test
+et regardé les poids : $82\,\%$ du temps à $|w| > 0{,}9$, écart-type $0{,}82$.
+La gaussienne clippée de PPO sature aux bornes --- pathologie connue de cette
+paramétrisation --- et mon agent « continu » est en réalité un agent discret qui
+bascule entre $-1$ et $+1$\ldots{} en payant en plus les frais du jitter (MSFT :
+$54\,\%$ long, $43\,\%$ short, alpha $-26{,}7\,\%$). Il hérite donc de la maladie
+2020 à l'identique : pleine taille dans le krach, kill-switch, gel, rebond raté.
+
+\paragraph{Bras B : l'effondrement flat.} Poids $|w| \leq 0{,}2$ en permanence sur
+les cinq actifs --- exactement le scénario de falsification que j'avais écrit dans
+la prédiction (« $\lambda$ trop fort $\to$ ne jamais s'exposer, à documenter, pas
+à retuner »). Le fait décisif : son fold 2020 vaut $-154\,\%$ \emph{sans que le
+kill-switch se déclenche}. Pas de krach subi, pur coût d'opportunité : face à un
+B\&H qui fait $+143\,\%$, ne rien porter coûte autant que se faire stopper.
+
+\subsection{Ce que ce double échec ferme --- et ce qu'il précise}
+
+C'est le résultat le plus utile de l'acte : \textbf{aucun schéma de réduction de
+risque ne peut passer C2, par construction}. L'alpha 2020 se mesure contre un
+marché qui rebondit de $+143\,\%$ ; dérisquer dans le krach, c'est rater le
+rebond, et l'alpha reste catastrophique --- par la perte (bras A, kill-switch) ou
+par l'absence (bras B, flat). Le trou 2020 n'est donc \emph{pas} un problème de
+dimensionnement : c'est un problème de \textbf{timing de ré-entrée}. Trois actes
+l'ont maintenant cerné par élimination : ni l'information de régime (Acte 3), ni
+l'incitation au sizing (Acte 5) ; ce qui manque à l'agent, c'est apprendre à
+\emph{revenir} --- et les rebonds en V sont précisément les épisodes les plus
+rares de l'historique, ce qui reboucle sur la motivation du générateur de
+scénarios (Acte 4) : fabriquer des ré-entrées à volonté, si un jour la génération
+conditionnelle passe le protocole.
+
+Leviers identifiés hors budget, consignés sans être lancés : paramétrisation de
+politique sans saturation (distribution Beta ou squashing tanh) pour que
+« continu » veuille dire continu ; pénalité \emph{asymétrique} (pénaliser
+l'exposition dans la vol \emph{descendante}, pas la vol de rebond) ; et le
+headline reste le Multi discret --- aucun candidat de cet acte ne l'approche
+(C1 : $+4{,}5$ et $+9{,}2\,\%$ contre $+17{,}2\,\%$).
+
+% ============================================================
 \section{Limites honnêtes et travaux futurs}
 \label{sec:limites}
 % ============================================================
 
 \begin{itemize}[itemsep=3pt]
-  \item \textbf{Profil régime-dépendant} (section~\ref{sec:wf}) : la limite principale.
-        La piste « features de régime » a été testée et falsifiée
-        (section~\ref{sec:regime}) ; les pistes restantes, par ordre : position
-        continue avec récompense sensible au régime, puis adversarial training.
+  \item \textbf{Profil régime-dépendant} (section~\ref{sec:wf}) : la limite
+        principale --- désormais cernée par élimination. « Features de régime » :
+        testée, falsifiée (section~\ref{sec:regime}). « Position continue $+$
+        aversion au risque » : testée, falsifiée aussi
+        (section~\ref{sec:continuous}) --- le trou 2020 est un problème de
+        \emph{timing de ré-entrée}, pas d'information ni de dimensionnement.
+        Pistes restantes : politique sans saturation (Beta/tanh), pénalité
+        asymétrique, ré-entraînement sur rebonds synthétiques (conditionné au
+        GO du protocole de l'Acte 4).
   \item \textbf{L'alpha est majoritairement porté par la règle de stop}
         (section~\ref{sec:stress}) : sans kill-switch, il reste $+5\,\%$ (Multi) à
         $-2\,\%$ (Single). L'agent n'a pas appris une gestion du risque continue ---

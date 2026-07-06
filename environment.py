@@ -71,6 +71,22 @@ class EnvConfig:
     # ⚠️  Changer la liste change l'observation space → réentraîner.
     features:          Optional[Tuple[str, ...]] = None
 
+    # ── Position continue (Acte 5) ───────────────────────────────────
+    # [GESTIONNAIRE] True → action = poids cible w ∈ [-1, 1] (Box) au lieu
+    # des 4 actions discrètes. Même comptabilité cash/shares (le short
+    # fractionnaire est un nombre de titres négatif), frais sur le notionnel
+    # échangé |Δshares|·P. L'observation garde sa taille : le slot position
+    # passe de {-1, 0, 1} à [-1, 1].
+    # ⚠️  Change l'action space → modèles discrets incompatibles.
+    continuous:        bool  = False
+
+    # [GESTIONNAIRE] λ ≥ 0 : aversion au risque dépendante du régime.
+    # Ajoute -λ·σ̂·|w|·reward_scaling à la récompense (σ̂ = vol des rendements
+    # sur la fenêtre d'observation) : porter de l'exposition coûte d'autant
+    # plus que le marché est nerveux → incite à dérisquer AVANT le
+    # kill-switch. 0 = désactivé (récompense historique inchangée).
+    risk_aversion:     float = 0.0
+
 
 FEATURES = [
     'log_returns',
@@ -132,7 +148,12 @@ class TradingEnv(gym.Env):
             dtype = np.float32
         )
         
-        self.action_space = spaces.Discrete(cfg.n_actions)
+        if cfg.continuous:
+            # Poids cible w ∈ [-1, 1] : -1 = short 100 %, 0 = flat, 1 = long 100 %
+            self.action_space = spaces.Box(
+                low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        else:
+            self.action_space = spaces.Discrete(cfg.n_actions)
         
         # ---- Segments (multi-ticker) ----
         # Si la donnée contient une colonne segment_id, on divise les épisodes
@@ -164,7 +185,11 @@ class TradingEnv(gym.Env):
         print(f"✅ TradingEnv initialisé")
         print(f"   Steps disponibles : {self.n_steps - cfg.window_size}")
         print(f"   Observation shape : {self.observation_space.shape}")
-        if cfg.n_actions == 4:
+        if cfg.continuous:
+            print(f"   Actions           : poids continu w ∈ [-1, 1]"
+                  + (f" | aversion risque λ={cfg.risk_aversion}"
+                     if cfg.risk_aversion > 0 else ""))
+        elif cfg.n_actions == 4:
             print(f"   Actions           : {{0: Hold, 1: Long, 2: Flat, 3: Short}}")
         else:
             print(f"   Actions           : {{0: Hold, 1: Buy, 2: Sell}}")
@@ -224,16 +249,22 @@ class TradingEnv(gym.Env):
     # ============================================================
     # STEP
     # ============================================================
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        
-        assert self.action_space.contains(action), f"Action invalide : {action}"
+    def step(self, action) -> Tuple[np.ndarray, float, bool, bool, dict]:
 
         prev_price    = self.prices[self._current_step - 1]
         current_price = self.prices[self._current_step]
         prev_value    = self._portfolio_value
 
         # --- Exécution de l'action ---
-        transaction_cost = self._execute_action(action, current_price)
+        if self.cfg.continuous:
+            # Le poids cible est clippé (PPO gaussien peut sortir de la boîte)
+            w_target = float(np.clip(
+                np.asarray(action, dtype=np.float64).reshape(-1)[0], -1.0, 1.0))
+            transaction_cost = self._rebalance_to(w_target, current_price)
+            action = w_target                     # loggé en float dans history
+        else:
+            assert self.action_space.contains(action), f"Action invalide : {action}"
+            transaction_cost = self._execute_action(action, current_price)
 
         # --- Mise à jour de la valeur du portfolio ---
         self._portfolio_value = self._cash + self._shares * current_price
@@ -388,8 +419,51 @@ class TradingEnv(gym.Env):
                 cost            += short_cost
 
         return cost
-    
-    
+
+
+    # ============================================================
+    # REBALANCEMENT CONTINU (Acte 5)
+    # ============================================================
+    def _rebalance_to(self, w_target: float, price: float) -> float:
+        """
+        Amène le portefeuille au poids cible w ∈ [-1, 1].
+
+        Même comptabilité que le discret : V = cash + shares × P, shares < 0
+        pour un short fractionnaire. On échange Δ = w·V/P − shares titres,
+        frais = |Δ|·P·tc débités du cash. Le poids réalisé après frais dévie
+        du poids cible d'un epsilon (le notionnel cible est calculé avant
+        frais) — approximation documentée, négligeable à tc = 0.1 %.
+        """
+        prev_w = float(self._position)
+        self._delta_w = abs(w_target - prev_w)
+
+        # Bande de non-rebalancement (0.5 % de poids) : sans elle, le jitter
+        # gaussien de PPO et la dérive du poids induite par les frais eux-mêmes
+        # déclencheraient un micro-trade payant à CHAQUE pas (hémorragie de
+        # frais). En-dessous du seuil : on ne touche à rien.
+        if self._delta_w < 0.005:
+            self._delta_w = 0.0
+            return 0.0
+
+        value = self._cash + self._shares * price
+        target_shares = w_target * value / price
+        delta = target_shares - self._shares
+        trade_notional = abs(delta) * price
+
+        if trade_notional < 1e-12:
+            return 0.0
+
+        cost = trade_notional * self.cfg.transaction_cost
+        self._cash  -= delta * price + cost
+        self._shares = target_shares
+
+        # entry_price au changement de signe : réfère le PnL latent de l'obs
+        if np.sign(w_target) != np.sign(prev_w):
+            self._entry_price = price if abs(w_target) > 1e-9 else 0.0
+        self._position = w_target
+        return cost
+
+
     # ============================================================
     # REWARD FUNCTION
     # ============================================================
@@ -435,10 +509,23 @@ class TradingEnv(gym.Env):
         drawdown = (self._peak_value - current_value) / (self._peak_value + 1e-8)
         drawdown_penalty = drawdown * 0.05
 
+        # Aversion au risque dépendante du régime (Acte 5, bras B) :
+        # porter |w| coûte proportionnellement à la nervosité du marché →
+        # paie le dérisquage AVANT que le kill-switch ne s'en charge.
+        risk_penalty = 0.0
+        if self.cfg.risk_aversion > 0.0:
+            risk_penalty = (
+                self.cfg.risk_aversion
+                * self._get_recent_volatility()
+                * abs(float(self._position))
+                * self.cfg.reward_scaling
+            )
+
         reward = (
             alpha * self.cfg.reward_scaling
             - tx_penalty
             - drawdown_penalty
+            - risk_penalty
         )
 
         return float(np.clip(reward, -10.0, 10.0))
@@ -463,13 +550,13 @@ class TradingEnv(gym.Env):
         current_price  = self.prices[self._current_step]
         unrealized_pnl = 0.0
 
-        if self._entry_price > 0:
-            if self._position == 1:
-                # Long : profit si prix monte
-                unrealized_pnl = (current_price - self._entry_price) / self._entry_price
-            elif self._position == -1:
-                # Short : profit si prix baisse
-                unrealized_pnl = (self._entry_price - current_price) / self._entry_price
+        # Formule signée unifiée : sign(w)·(P/P_entry − 1) — identique à
+        # l'ancien if/elif pour w ∈ {-1, 1}, et valide pour w fractionnaire.
+        if self._entry_price > 0 and abs(float(self._position)) > 1e-9:
+            unrealized_pnl = (
+                np.sign(float(self._position))
+                * (current_price - self._entry_price) / self._entry_price
+            )
 
         portfolio_state = np.array([
             float(self._position),   # -1 (short) | 0 (flat) | 1 (long)
@@ -553,15 +640,21 @@ class TradingEnv(gym.Env):
             "actions"          : [],
             "rewards"          : [],
             "n_trades"         : 0,
+            "turnover"         : 0.0,   # Σ|Δw| (mode continu)
         }
-    
-    
-    def _update_history(self, action: int, price: float, reward: float):
+        self._delta_w = 0.0
+
+
+    def _update_history(self, action, price: float, reward: float):
         self.history["portfolio_values"].append(self._portfolio_value)
         self.history["prices"].append(price)
         self.history["actions"].append(action)
         self.history["rewards"].append(reward)
-        if action in [1, 2, 3]:
+        if self.cfg.continuous:
+            self.history["turnover"] += self._delta_w
+            if self._delta_w > 0.01:          # rebalancement significatif
+                self.history["n_trades"] += 1
+        elif action in [1, 2, 3]:
             self.history["n_trades"] += 1
     
     

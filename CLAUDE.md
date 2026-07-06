@@ -71,6 +71,13 @@ Si les chiffres changent, mettre aussi à jour la section **Results** du `README
   → `reports/seed_robustness.json` = la bande de bruit de référence)
 - Expérience régime : `python regime_experiment.py` (~35 min ; features via
   `DataConfig(regime_features=True)` + `EnvConfig(features=...)`, obs 52→72)
+- Expérience sizing continu (Acte 5, VERDICT : double NO-GO) :
+  `python continuous_experiment.py` (~2 h ; `EnvConfig(continuous=True[,
+  risk_aversion=λ])`, action Box[-1,1]) — bras A sature en bang-bang (82 %
+  |w|>0.9, gaussienne clippée), bras B s'effondre flat (λ=0.1 trop fort).
+  Enseignement : le fold 2020 est un problème de TIMING de ré-entrée, pas de
+  sizing. Leviers hors budget consignés au rapport (`sec:continuous`) :
+  politique Beta/tanh, pénalité asymétrique.
 - **Convention expériences** : un modèle candidat s'entraîne dans SON dossier
   (`models/ppo_multi_regime/`, `models/seeds/…`) et n'est promu headline
   (`models/ppo_multi/`) que s'il gagne HORS bande de bruit inter-seeds.
